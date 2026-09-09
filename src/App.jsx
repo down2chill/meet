@@ -1,9 +1,14 @@
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
 import {
   useRealtimeKitClient,
   RealtimeKitProvider,
 } from "@cloudflare/realtimekit-react";
-import { RtkMeeting } from "@cloudflare/realtimekit-react-ui";
+
+const RtkMeeting = lazy(() =>
+  import("@cloudflare/realtimekit-react-ui").then((m) => ({
+    default: m.RtkMeeting,
+  }))
+);
 
 /* ---------- CHANGE THESE ---------- */
 const COMPANY = "Down2Chill";
@@ -80,6 +85,11 @@ function Join() {
         setBusy(false);
         return;
       }
+
+      // Start downloading the meeting UI bundle immediately, in parallel
+      // with the token request, so neither waits on the other.
+      const uiPreload = import("@cloudflare/realtimekit-react-ui");
+
       const r = await fetch("/api/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -92,10 +102,14 @@ function Join() {
         setBusy(false);
         return;
       }
+
       await initMeeting({
         authToken: d.authToken,
         defaults: { audio: true, video: true },
       });
+
+      await uiPreload;
+
       setErr("");
       setJoined(true);
     } catch (e) {
@@ -108,11 +122,13 @@ function Join() {
   if (joined && meeting) {
     return (
       <RealtimeKitProvider value={meeting}>
-        <RtkMeeting
-          meeting={meeting}
-          showSetupScreen={true}
-          style={{ height: "100vh", width: "100vw" }}
-        />
+        <Suspense fallback={<div style={box}>Loading meeting...</div>}>
+          <RtkMeeting
+            meeting={meeting}
+            showSetupScreen={true}
+            style={{ height: "100vh", width: "100vw" }}
+          />
+        </Suspense>
       </RealtimeKitProvider>
     );
   }
