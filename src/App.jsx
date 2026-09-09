@@ -119,6 +119,7 @@ function Join() {
   async function go() {
     setBusy(true);
     setErr("Connecting...");
+    const tStart = performance.now();
     const timer = makeTimer();
     try {
       if (!code) {
@@ -144,8 +145,9 @@ function Join() {
 
       setIsHost(!!hostKey);
 
-      await camWarm.current;
-      timer.mark("camera ready");
+      // Deliberately NOT awaited. If the permission prompt is still open,
+      // awaiting it would block the whole join until the user clicks Allow.
+      camWarm.current.then((ok) => console.log("camera warm:", ok));
 
       await initMeeting({
         authToken: d.authToken,
@@ -156,9 +158,15 @@ function Join() {
       await uiPreload.current;
       timer.mark("ui bundle");
 
+      timer.print();
       setErr("");
       setJoined(true);
-      timer.print();
+
+      // Log again once the component has had a moment to mount, so we can
+      // see how long the meeting UI itself takes to appear.
+      setTimeout(() => {
+        console.log("time to UI mounted:", Math.round(performance.now() - tStart), "ms");
+      }, 0);
     } catch (e) {
       setErr("Error: " + (e && e.message ? e.message : e));
       console.error(e);
