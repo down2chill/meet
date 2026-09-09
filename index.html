@@ -1,9 +1,19 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Down2Chill Meet</title>
+
+    <!--
+      The three hosts every join talks to. Opening the TCP + TLS connections
+      while the page is still rendering takes that handshake off the critical
+      path once the user clicks Join.
+    -->
+    <link rel="preconnect" href="https://api.realtime.cloudflare.com" crossorigin />
+    <link rel="preconnect" href="https://location.realtime.cloudflare.com" crossorigin />
+    <link rel="dns-prefetch" href="https://socket-edge.realtime.cloudflare.com" />
+
     <style>
       html,
       body,

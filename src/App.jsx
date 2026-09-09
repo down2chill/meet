@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   useRealtimeKitClient,
   RealtimeKitProvider,
+  initRTKMedia,
 } from "@cloudflare/realtimekit-react";
 
 const RtkMeeting = lazy(() =>
@@ -14,6 +15,46 @@ const RtkMeeting = lazy(() =>
 const COMPANY = "Down2Chill";
 const BRAND = "#0D51FD";
 /* --------------------------------- */
+
+// Mint the token and initialise the SDK while the user is still typing their
+// name, so clicking Join is near-instant instead of a ~3s wait. The trade-off:
+// the camera is acquired on page load and held (the indicator light stays on),
+// and a participant token is minted even if they never join. Set to false to
+// do all of it on click instead.
+const PREWARM = true;
+
+// tracing:false stops the SDK shipping OpenTelemetry logs. That endpoint sends
+// CORS headers Firefox complains about, once every few seconds, for telemetry
+// we never look at. devTools.logs:false keeps its internal logger off the
+// console too.
+const SDK_MODULES = {
+  tracing: false,
+  devTools: { logs: false, logLevel: "off" },
+};
+
+const MEDIA = { audio: true, video: true };
+
+// Timing and diagnostics only when asked for: add ?debug=1 to the URL.
+const DEBUG = new URLSearchParams(location.search).has("debug");
+const log = (...a) => {
+  if (DEBUG) console.log(...a);
+};
+
+const NAME_KEY = "meet:name";
+const savedName = () => {
+  try {
+    return localStorage.getItem(NAME_KEY) || "";
+  } catch (e) {
+    return "";
+  }
+};
+const rememberName = (n) => {
+  try {
+    localStorage.setItem(NAME_KEY, n);
+  } catch (e) {
+    /* private mode */
+  }
+};
 
 const box = {
   display: "flex",
@@ -57,116 +98,169 @@ const errStyle = {
   wordBreak: "break-word",
 };
 
-// Stopwatch that prints a per-stage breakdown to the console.
-function makeTimer() {
-  const t0 = performance.now();
-  let last = t0;
-  const marks = [];
-  return {
-    mark(label) {
-      const now = performance.now();
-      marks.push([label, Math.round(now - last), Math.round(now - t0)]);
-      last = now;
-    },
-    print() {
-      console.log("--- join timing (step ms / total ms) ---");
-      marks.forEach(([l, step, total]) => console.log(l, step, "/", total));
-    },
-  };
+async function postJoin(payload) {
+  const r = await fetch("/api/join", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let body = null;
+  try {
+    body = await r.json();
+  } catch (e) {
+    /* non-JSON error page */
+  }
+  return { status: r.status, body: body || {} };
 }
 
 export default function App() {
-  const path = window.location.pathname;
-  if (path.startsWith("/j/")) return <Join />;
-  return <NewMeeting />;
+  return location.pathname.startsWith("/j/") ? <Join /> : <NewMeeting />;
 }
 
 function Join() {
-  const [meeting, initMeeting] = useRealtimeKitClient();
+  const [, initMeeting] = useRealtimeKitClient();
+  const [client, setClient] = useState(null);
   const [joined, setJoined] = useState(false);
   const [isHost, setIsHost] = useState(false);
+  const [needsPw, setNeedsPw] = useState(false);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [name, setName] = useState("");
+  const [name, setName] = useState(savedName);
   const [pw, setPw] = useState("");
-  const uiPreload = useRef(null);
-  const camWarm = useRef(null);
 
-  const parts = window.location.pathname.split("/");
+  const warm = useRef({ ui: null, media: Promise.resolve(), ready: null });
+  const started = useRef(false);
+
+  const parts = location.pathname.split("/");
   const code = parts[parts.indexOf("j") + 1] || "";
+  // Newer host links carry the key in the fragment, which browsers never put
+  // in a request or a Referer header. Older ?host= links still work.
   const hostKey =
-    new URLSearchParams(window.location.search).get("host") || "";
+    new URLSearchParams(location.hash.slice(1)).get("host") ||
+    new URLSearchParams(location.search).get("host") ||
+    "";
 
-  // Start the two slowest things the moment the page renders, while the
-  // user is still typing their name. Neither blocks the UI.
   useEffect(() => {
-    uiPreload.current = import("@cloudflare/realtimekit-react-ui");
+    if (started.current) return; // StrictMode runs effects twice in dev
+    started.current = true;
 
-    camWarm.current = navigator.mediaDevices
-      .getUserMedia({ audio: true, video: true })
-      .then((stream) => {
-        // Release immediately. The permission grant and device wake-up are
-        // what we wanted; the SDK acquires its own tracks afterwards.
-        stream.getTracks().forEach((t) => t.stop());
-        return true;
-      })
+    const t0 = performance.now();
+
+    // The meeting UI is the largest chunk on the page. Start it immediately.
+    const ui = import("@cloudflare/realtimekit-react-ui");
+
+    // Acquires the devices once and hands the tracks to the SDK, instead of
+    // the old grab-then-stop warm-up that made init re-acquire them.
+    const media = initRTKMedia(MEDIA)
       .catch((e) => {
-        console.log("camera warm-up skipped:", e.name);
-        return false;
+        // No camera on this machine: still warm the microphone. A denied
+        // permission is not retried, that would only prompt a second time.
+        if (e && (e.name === "NotFoundError" || e.name === "OverconstrainedError"))
+          return initRTKMedia({ audio: true, video: false });
+        throw e;
+      })
+      .then(
+        () => log("media ready", Math.round(performance.now() - t0), "ms"),
+        (e) => log("media warm-up skipped:", e && e.name)
+      );
+
+    warm.current = { ui, media, ready: null };
+    if (!PREWARM || !code) return;
+
+    // The first attempt carries no password. The worker answers a protected
+    // room with needsPassword instead of a token, which is what decides
+    // whether to show the password field at all.
+    warm.current.ready = (async () => {
+      const d = await postJoin({ code, hostKey, name: savedName(), password: "" });
+
+      if (d.body.needsPassword) {
+        setNeedsPw(true);
+        return null;
+      }
+      if (d.status === 404) {
+        setErr("That meeting link is not valid.");
+        return null;
+      }
+      if (!d.body.authToken) return null;
+
+      await media; // tracks first, so init adopts them
+      const c = await initMeeting({
+        authToken: d.body.authToken,
+        defaults: MEDIA,
+        modules: SDK_MODULES,
       });
+      if (!c) return null;
+
+      log("prewarm ready", Math.round(performance.now() - t0), "ms");
+      return { client: c, isHost: !!d.body.isHost };
+    })().catch((e) => {
+      log("prewarm failed:", e && e.message);
+      return null; // the click path will do it from scratch
+    });
   }, []);
 
+  async function coldJoin() {
+    const d = await postJoin({ code, hostKey, name, password: pw });
+
+    if (d.body.needsPassword) {
+      setNeedsPw(true);
+      setErr(d.body.error || "This meeting needs a password.");
+      return null;
+    }
+    if (!d.body.authToken) {
+      setErr(d.body.error || "Could not join");
+      return null;
+    }
+
+    await warm.current.media;
+    const c = await initMeeting({
+      authToken: d.body.authToken,
+      defaults: MEDIA,
+      modules: SDK_MODULES,
+    });
+    if (!c) {
+      setErr("Could not start the meeting client.");
+      return null;
+    }
+    return { client: c, isHost: !!d.body.isHost };
+  }
+
   async function go() {
+    if (busy) return;
+    if (!code) {
+      setErr("No meeting code in the URL.");
+      return;
+    }
+
     setBusy(true);
-    setErr("Connecting...");
-    const tStart = performance.now();
-    const timer = makeTimer();
+    setErr("");
+    const t0 = performance.now();
+
     try {
-      if (!code) {
-        setErr("No meeting code in the URL.");
+      const session = (warm.current.ready && (await warm.current.ready)) || (await coldJoin());
+      if (!session) {
         setBusy(false);
         return;
       }
 
-      const r = await fetch("/api/join", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, hostKey, name, password: pw }),
-      });
-      const d = await r.json();
-      timer.mark("token from worker");
-
-      if (!d.authToken) {
-        setErr(d.error || "Could not join");
-        console.log(d);
-        setBusy(false);
-        return;
+      // The prewarmed token was minted before we knew the name, so set the
+      // display name now. It is read when the client actually joins the room.
+      const trimmed = name.trim();
+      if (trimmed) {
+        rememberName(trimmed);
+        try {
+          session.client.self.setName(trimmed);
+        } catch (e) {
+          log("setName failed:", e && e.message);
+        }
       }
 
-      setIsHost(!!hostKey);
+      await warm.current.ui;
 
-      // Deliberately NOT awaited. If the permission prompt is still open,
-      // awaiting it would block the whole join until the user clicks Allow.
-      camWarm.current.then((ok) => console.log("camera warm:", ok));
-
-      await initMeeting({
-        authToken: d.authToken,
-        defaults: { audio: true, video: true },
-      });
-      timer.mark("sdk init");
-
-      await uiPreload.current;
-      timer.mark("ui bundle");
-
-      timer.print();
-      setErr("");
+      setClient(session.client);
+      setIsHost(session.isHost);
       setJoined(true);
-
-      // Log again once the component has had a moment to mount, so we can
-      // see how long the meeting UI itself takes to appear.
-      setTimeout(() => {
-        console.log("time to UI mounted:", Math.round(performance.now() - tStart), "ms");
-      }, 0);
+      log("click to meeting UI:", Math.round(performance.now() - t0), "ms");
     } catch (e) {
       setErr("Error: " + (e && e.message ? e.message : e));
       console.error(e);
@@ -174,12 +268,12 @@ function Join() {
     }
   }
 
-  if (joined && meeting) {
+  if (joined && client) {
     return (
-      <RealtimeKitProvider value={meeting}>
+      <RealtimeKitProvider value={client}>
         <Suspense fallback={<div style={box}>Loading meeting...</div>}>
           <RtkMeeting
-            meeting={meeting}
+            meeting={client}
             showSetupScreen={isHost}
             style={{ height: "100vh", width: "100vw" }}
           />
@@ -188,6 +282,10 @@ function Join() {
     );
   }
 
+  const onEnter = (e) => {
+    if (e.key === "Enter") go();
+  };
+
   return (
     <div style={box}>
       <div style={brandStyle}>{COMPANY}</div>
@@ -195,22 +293,22 @@ function Join() {
         style={input}
         placeholder="Your name"
         autoComplete="name"
+        autoFocus
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !busy) go();
-        }}
+        onKeyDown={onEnter}
       />
-      <input
-        style={input}
-        type="password"
-        placeholder="Password (if required)"
-        value={pw}
-        onChange={(e) => setPw(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !busy) go();
-        }}
-      />
+      {needsPw && (
+        <input
+          style={input}
+          type="password"
+          placeholder="Meeting password"
+          autoComplete="off"
+          value={pw}
+          onChange={(e) => setPw(e.target.value)}
+          onKeyDown={onEnter}
+        />
+      )}
       <button style={button} onClick={go} disabled={busy}>
         {busy ? "Joining..." : "Join meeting"}
       </button>
@@ -224,9 +322,12 @@ function NewMeeting() {
   const [pw, setPw] = useState("");
   const [links, setLinks] = useState(null);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function create() {
-    setErr("Creating...");
+    if (busy) return;
+    setBusy(true);
+    setErr("");
     try {
       const r = await fetch("/api/rooms", {
         method: "POST",
@@ -234,16 +335,16 @@ function NewMeeting() {
         body: JSON.stringify({ title, password: pw }),
       });
       const d = await r.json();
-      if (d.error) {
-        setErr(d.error);
-        console.log(d);
+      if (!r.ok || d.error) {
+        setErr(d.error || "Could not create the meeting.");
         return;
       }
-      setErr("");
       setLinks(d);
     } catch (e) {
       setErr("Error: " + (e && e.message ? e.message : e));
       console.error(e);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -258,12 +359,14 @@ function NewMeeting() {
       />
       <input
         style={input}
+        type="password"
         placeholder="Password (optional)"
+        autoComplete="new-password"
         value={pw}
         onChange={(e) => setPw(e.target.value)}
       />
-      <button style={button} onClick={create}>
-        Create meeting
+      <button style={button} onClick={create} disabled={busy}>
+        {busy ? "Creating..." : "Create meeting"}
       </button>
       <div style={errStyle}>{err}</div>
       {links && (
