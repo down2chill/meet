@@ -39,7 +39,9 @@ const MAX_PASSWORD = 128;
 const MAX_NAME = 60;
 const MAX_BODY = 4096; // bytes. Nothing legitimate comes close.
 const ROOM_TTL = 60 * 60 * 24 * 30;
-const KV_CACHE_TTL = 300; // room records only change when an admin edits one
+// KV's minimum. Anything longer means a deleted meeting stays joinable, and a
+// changed password stays accepted, at an edge that already cached the record.
+const KV_CACHE_TTL = 60;
 const UPSTREAM_TIMEOUT = 10000;
 
 const SESSION_TTL = 60 * 60 * 12; // 12 hours
@@ -258,7 +260,21 @@ async function createRoom(request, env, url) {
 
   await putRoom(env, code, record);
 
-  return json({ code, ...links(url, code, hostKey) });
+  // The dashboard inserts this row straight into its list. Waiting for a fresh
+  // /api/meetings would be a race: KV's list index does not show a brand new
+  // key for a few seconds.
+  return json({
+    code,
+    ...links(url, code, hostKey),
+    meeting: {
+      code,
+      title: record.title,
+      createdAt: record.createdAt,
+      hasPassword: !!record.pwHash,
+      expiresAt: record.exp,
+      guestLink: links(url, code).guestLink,
+    },
+  });
 }
 
 // One KV list call renders the whole dashboard. The title, creation time and
@@ -294,7 +310,11 @@ async function listMeetings(request, env, url) {
     head.map((l) => env.ROOMS.get(l.name, { type: "json", cacheTtl: KV_CACHE_TTL }))
   );
   head.forEach((l, i) => {
-    const r = rows[i] || {};
+    const r = rows[i];
+    // A key that still lists but no longer reads has just been deleted: KV's
+    // list index lags the delete by a few seconds. Skip it rather than drawing
+    // a ghost row that cannot be joined.
+    if (!r) return;
     meetings.push({
       code: l.code,
       title: r.title || "(untitled)",
@@ -343,7 +363,13 @@ async function updateMeeting(request, env, code) {
   }
 
   await putRoom(env, code, room);
-  return json({ ok: true, title: room.title, hasPassword: !!room.pwHash });
+  // Returned so the dashboard can update its row without re-reading the list.
+  return json({
+    ok: true,
+    title: room.title,
+    hasPassword: !!room.pwHash,
+    expiresAt: room.exp,
+  });
 }
 
 // The host key is only ever stored as a hash, so it cannot be shown again
@@ -463,11 +489,13 @@ async function serveAsset(request, env) {
 // Writing a room always refreshes the listing metadata and keeps whatever is
 // left of the original 30 days, so editing a meeting does not extend its life.
 function putRoom(env, code, record) {
-  const remaining = record.exp
-    ? record.exp - Math.floor(Date.now() / 1000)
-    : ROOM_TTL;
+  const now = Math.floor(Date.now() / 1000);
+  const remaining = record.exp ? record.exp - now : ROOM_TTL;
+  const ttl = Math.max(60, Math.min(remaining, ROOM_TTL));
+  record.exp = now + ttl; // keep the record honest about its own expiry
+
   return env.ROOMS.put("room:" + code, JSON.stringify(record), {
-    expirationTtl: Math.max(60, Math.min(remaining, ROOM_TTL)),
+    expirationTtl: ttl,
     metadata: {
       t: record.title || "Meeting",
       c: record.createdAt || null,

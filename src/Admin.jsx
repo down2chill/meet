@@ -27,18 +27,16 @@ export default function Admin() {
   const [username, setUsername] = useState("");
   const [meetings, setMeetings] = useState(null);
   const [truncated, setTruncated] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
+    setBusy(true);
     const r = await api("/api/meetings");
-    if (r.status === 401) {
-      setAuthed(false);
-      return;
-    }
-    if (!r.ok) {
-      setErr(r.body.error || "Could not load meetings.");
-      return;
-    }
+    setBusy(false);
+    if (r.status === 401) return setAuthed(false);
+    if (!r.ok) return setErr(r.body.error || "Could not load meetings.");
+    setErr("");
     setMeetings(r.body.meetings || []);
     setTruncated(!!r.body.truncated);
   }, []);
@@ -46,15 +44,25 @@ export default function Admin() {
   useEffect(() => {
     (async () => {
       const s = await api("/api/session");
-      if (!s.body.authed) {
-        setAuthed(false);
-        return;
-      }
+      if (!s.body.authed) return setAuthed(false);
       setAuthed(true);
       setUsername(s.body.username || "");
       load();
     })();
   }, [load]);
+
+  // KV's list index trails writes by a few seconds, so re-fetching after every
+  // change is a race: a just-deleted meeting still lists, and a just-created
+  // one does not. We already know the outcome of each write, so apply it to
+  // the list directly. Fewer requests and no flicker.
+  const addMeeting = (m) =>
+    setMeetings((l) => [m, ...(l || []).filter((x) => x.code !== m.code)]);
+  const dropMeeting = (code) =>
+    setMeetings((l) => (l || []).filter((x) => x.code !== code));
+  const patchMeeting = (code, patch) =>
+    setMeetings((l) =>
+      (l || []).map((x) => (x.code === code ? { ...x, ...patch } : x))
+    );
 
   if (authed === null) return <div style={centred}>Loading...</div>;
 
@@ -85,8 +93,11 @@ export default function Admin() {
           }}
         >
           <div style={{ ...brandStyle, marginBottom: 0 }}>{COMPANY} admin</div>
-          <div style={row}>
+          <div style={{ ...row, alignItems: "center" }}>
             <span style={muted}>{username}</span>
+            <button style={linkStyle} onClick={load} disabled={busy}>
+              {busy ? "Refreshing..." : "Refresh"}
+            </button>
             <button
               style={linkStyle}
               onClick={async () => {
@@ -99,7 +110,7 @@ export default function Admin() {
           </div>
         </header>
 
-        <Create onCreated={load} />
+        <Create onCreated={addMeeting} />
 
         <div style={{ ...errStyle, margin: "16px 0" }}>{err}</div>
 
@@ -109,15 +120,18 @@ export default function Admin() {
 
         {meetings === null && <div style={muted}>Loading...</div>}
         {meetings && meetings.length === 0 && (
-          <div style={{ ...card, ...muted }}>
-            No meetings yet. Create one above.
-          </div>
+          <div style={{ ...card, ...muted }}>No meetings yet. Create one above.</div>
         )}
 
         <div style={stack}>
           {meetings &&
             meetings.map((m) => (
-              <Meeting key={m.code} m={m} onChange={load} />
+              <Meeting
+                key={m.code}
+                m={m}
+                onDeleted={() => dropMeeting(m.code)}
+                onUpdated={(patch) => patchMeeting(m.code, patch)}
+              />
             ))}
         </div>
 
@@ -155,7 +169,7 @@ function Create({ onCreated }) {
       setLinks(r.body);
       setTitle("");
       setPw("");
-      onCreated();
+      if (r.body.meeting) onCreated(r.body.meeting);
     } finally {
       setBusy(false);
     }
@@ -196,7 +210,7 @@ function Create({ onCreated }) {
   );
 }
 
-function Meeting({ m, onChange }) {
+function Meeting({ m, onDeleted, onUpdated }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [hostLink, setHostLink] = useState("");
@@ -217,17 +231,13 @@ function Meeting({ m, onChange }) {
 
   return (
     <div style={card}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 600, wordBreak: "break-word" }}>{m.title}</div>
-          <div style={{ ...muted, marginTop: 4 }}>
-            <code>{m.code}</code>
-            {" · "}
-            {when(m.createdAt)}
-            {m.expiresAt ? " · " + expiresIn(m.expiresAt) : ""}
-            {m.hasPassword ? " · password" : ""}
-          </div>
-        </div>
+      <div style={{ fontWeight: 600, wordBreak: "break-word" }}>{m.title}</div>
+      <div style={{ ...muted, marginTop: 4 }}>
+        <code>{m.code}</code>
+        {" · "}
+        {when(m.createdAt)}
+        {m.expiresAt ? " · " + expiresIn(m.expiresAt) : ""}
+        {m.hasPassword ? " · password" : ""}
       </div>
 
       <div style={{ ...row, marginTop: 14 }}>
@@ -260,12 +270,12 @@ function Meeting({ m, onChange }) {
               disabled={busy}
               onClick={async () => {
                 const b = await act("/api/meetings/" + m.code, { method: "DELETE" });
-                if (b) onChange();
+                if (b) onDeleted();
               }}
             >
               Really delete
             </button>
-            <button style={small} onClick={() => setConfirming(false)}>
+            <button style={small} onClick={() => setConfirming(false)} disabled={busy}>
               Keep
             </button>
           </>
@@ -290,9 +300,9 @@ function Meeting({ m, onChange }) {
       {editing && (
         <Edit
           m={m}
-          onSaved={() => {
+          onSaved={(patch) => {
             setEditing(false);
-            onChange();
+            onUpdated(patch);
           }}
         />
       )}
@@ -322,7 +332,11 @@ function Edit({ m, onSaved }) {
       setErr(r.body.error || "Could not save.");
       return;
     }
-    onSaved();
+    onSaved({
+      title: r.body.title,
+      hasPassword: !!r.body.hasPassword,
+      expiresAt: r.body.expiresAt || m.expiresAt,
+    });
   }
 
   return (
@@ -336,11 +350,7 @@ function Edit({ m, onSaved }) {
       }}
     >
       <label style={label}>Title</label>
-      <input
-        style={input}
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-      />
+      <input style={input} value={title} onChange={(e) => setTitle(e.target.value)} />
 
       {!changePw ? (
         <button style={ghost} type="button" onClick={() => setChangePw(true)}>
@@ -348,9 +358,7 @@ function Edit({ m, onSaved }) {
         </button>
       ) : (
         <>
-          <label style={label}>
-            New password (leave empty to remove it)
-          </label>
+          <label style={label}>New password (leave empty to remove it)</label>
           <input
             style={input}
             type="password"
