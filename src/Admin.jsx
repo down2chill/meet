@@ -1,26 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
+import { COMPANY, api, when, expiresIn } from "./ui.js";
 import {
-  COMPANY,
-  api,
-  page,
-  centred,
-  card,
-  narrow,
-  brandStyle,
-  input,
-  button,
-  ghost,
-  small,
-  danger,
-  linkStyle,
-  errStyle,
-  muted,
-  label,
-  stack,
-  row,
-  when,
-  expiresIn,
-} from "./ui.js";
+  Shell,
+  TopBar,
+  Footer,
+  Waiting,
+  LockIcon,
+  CheckIcon,
+  ArrowIcon,
+} from "./chrome.jsx";
 
 export default function Admin() {
   const [authed, setAuthed] = useState(null);
@@ -64,66 +52,75 @@ export default function Admin() {
       (l || []).map((x) => (x.code === code ? { ...x, ...patch } : x))
     );
 
-  if (authed === null) return <div style={centred}>Loading...</div>;
+  if (authed === null) return <Waiting text="Checking your session..." />;
 
   if (authed === false)
     return (
-      <div style={centred}>
-        <div style={{ ...card, ...narrow, textAlign: "center" }}>
-          <div style={brandStyle}>{COMPANY}</div>
-          <p style={muted}>Your session has ended.</p>
-          <a style={{ ...button, display: "block", textDecoration: "none" }} href="/">
-            Go to sign in
-          </a>
+      <Shell center bar={<TopBar />}>
+        <div className="narrow">
+          <div className="card" style={{ textAlign: "center" }}>
+            <div className="eyebrow" style={{ marginBottom: 8 }}>
+              {COMPANY} Meet
+            </div>
+            <div className="card-title" style={{ fontSize: 20, marginBottom: 10 }}>
+              Your session has ended
+            </div>
+            <p className="muted" style={{ marginBottom: 20 }}>
+              Sessions last 12 hours. Sign in again to pick up where you left off.
+            </p>
+            <a className="btn" href="/">
+              Go to sign in <ArrowIcon />
+            </a>
+          </div>
+          <Footer />
         </div>
-      </div>
+      </Shell>
     );
 
+  const bar = (
+    <TopBar>
+      <span className="topbar-who">{username}</span>
+      <button className="btn btn-link" onClick={load} disabled={busy}>
+        {busy ? "Refreshing..." : "Refresh"}
+      </button>
+      <button
+        className="btn btn-link"
+        onClick={async () => {
+          await api("/api/logout", { method: "POST" });
+          location.href = "/";
+        }}
+      >
+        Sign out
+      </button>
+    </TopBar>
+  );
+
   return (
-    <div style={page}>
-      <div style={{ width: "100%", maxWidth: 720 }}>
-        <header
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-            marginBottom: 24,
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ ...brandStyle, marginBottom: 0 }}>{COMPANY} admin</div>
-          <div style={{ ...row, alignItems: "center" }}>
-            <span style={muted}>{username}</span>
-            <button style={linkStyle} onClick={load} disabled={busy}>
-              {busy ? "Refreshing..." : "Refresh"}
-            </button>
-            <button
-              style={linkStyle}
-              onClick={async () => {
-                await api("/api/logout", { method: "POST" });
-                location.href = "/";
-              }}
-            >
-              Sign out
-            </button>
-          </div>
-        </header>
+    <Shell bar={bar}>
+      <div className="wrap">
+        <div className="eyebrow">{COMPANY} Meet</div>
+        <h1 className="hero-title display" style={{ fontSize: "clamp(2.2rem, 7vw, 3.2rem)", marginTop: 12 }}>
+          Meeting <span className="accent">rooms.</span>
+        </h1>
 
-        <Create onCreated={addMeeting} />
+        <div style={{ marginTop: 28 }}>
+          <Create onCreated={addMeeting} />
+        </div>
 
-        <div style={{ ...errStyle, margin: "16px 0" }}>{err}</div>
+        <div className="err err-left" style={{ marginTop: 14 }}>
+          {err}
+        </div>
 
-        <h2 style={{ fontSize: 15, fontWeight: 600, margin: "8px 0 12px" }}>
-          Meetings{meetings ? " (" + meetings.length + ")" : ""}
+        <h2 className="section-title">
+          Meetings{meetings ? " · " + meetings.length : ""}
         </h2>
 
-        {meetings === null && <div style={muted}>Loading...</div>}
+        {meetings === null && <div className="empty">Loading...</div>}
         {meetings && meetings.length === 0 && (
-          <div style={{ ...card, ...muted }}>No meetings yet. Create one above.</div>
+          <div className="card empty">No meetings yet. Create one above.</div>
         )}
 
-        <div style={stack}>
+        <div className="stack">
           {meetings &&
             meetings.map((m) => (
               <Meeting
@@ -136,12 +133,14 @@ export default function Admin() {
         </div>
 
         {truncated && (
-          <div style={{ ...muted, marginTop: 16 }}>
+          <div className="hint" style={{ marginTop: 16 }}>
             Showing the first 1000 meetings.
           </div>
         )}
+
+        <Footer />
       </div>
-    </div>
+    </Shell>
   );
 }
 
@@ -176,34 +175,39 @@ function Create({ onCreated }) {
   }
 
   return (
-    <div style={card}>
-      <form onSubmit={submit} style={stack}>
-        <label style={label}>New meeting</label>
+    <div className="card card-brand">
+      <div className="eyebrow" style={{ marginBottom: 14 }}>
+        New meeting
+      </div>
+
+      <form onSubmit={submit} className="stack">
         <input
-          style={input}
+          className="field"
           placeholder="Meeting title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
         <input
-          style={input}
+          className="field"
           type="password"
           placeholder="Password (optional)"
           autoComplete="new-password"
           value={pw}
           onChange={(e) => setPw(e.target.value)}
         />
-        <button style={button} type="submit" disabled={busy}>
+        <button className="btn" type="submit" disabled={busy}>
           {busy ? "Creating..." : "Create meeting"}
         </button>
       </form>
 
-      <div style={{ ...errStyle, marginTop: 12 }}>{err}</div>
+      <div className="err" style={{ marginTop: 14 }}>
+        {err}
+      </div>
 
       {links && (
-        <div style={{ marginTop: 16 }}>
+        <div className="divider">
           <Copyable caption="Invite link" value={links.guestLink} />
-          <Copyable caption="Host link (keep this one)" value={links.hostLink} />
+          <Copyable caption="Host link — keep this one" value={links.hostLink} />
         </div>
       )}
     </div>
@@ -230,29 +234,40 @@ function Meeting({ m, onDeleted, onUpdated }) {
   };
 
   return (
-    <div style={card}>
-      <div style={{ fontWeight: 600, wordBreak: "break-word" }}>{m.title}</div>
-      <div style={{ ...muted, marginTop: 4 }}>
-        <code>{m.code}</code>
-        {" · "}
-        {when(m.createdAt)}
-        {m.expiresAt ? " · " + expiresIn(m.expiresAt) : ""}
-        {m.hasPassword ? " · password" : ""}
+    <div className="card card-row">
+      <div className="card-title">{m.title}</div>
+
+      <div className="meta">
+        <span className="code-chip">{m.code}</span>
+        <span>{when(m.createdAt)}</span>
+        {m.expiresAt && (
+          <>
+            <span className="meta-sep">/</span>
+            <span>{expiresIn(m.expiresAt)}</span>
+          </>
+        )}
+        {m.hasPassword && (
+          <span className="lock">
+            <LockIcon />
+            password
+          </span>
+        )}
       </div>
 
-      <div style={{ ...row, marginTop: 14 }}>
-        <a
-          style={{ ...small, textDecoration: "none", display: "inline-block" }}
-          href={"/j/" + m.code}
-        >
+      <div className="row" style={{ marginTop: 16 }}>
+        <a className="btn btn-sm" href={"/j/" + m.code}>
           Join as host
         </a>
         <CopyButton value={m.guestLink} labelText="Copy invite" />
-        <button style={small} onClick={() => setEditing(!editing)} disabled={busy}>
+        <button
+          className="btn btn-sm"
+          onClick={() => setEditing(!editing)}
+          disabled={busy}
+        >
           {editing ? "Close" : "Edit"}
         </button>
         <button
-          style={small}
+          className="btn btn-sm"
           disabled={busy}
           onClick={async () => {
             const b = await act("/api/meetings/" + m.code + "/host", {
@@ -266,7 +281,7 @@ function Meeting({ m, onDeleted, onUpdated }) {
         {confirming ? (
           <>
             <button
-              style={danger}
+              className="btn btn-sm btn-danger"
               disabled={busy}
               onClick={async () => {
                 const b = await act("/api/meetings/" + m.code, { method: "DELETE" });
@@ -275,23 +290,33 @@ function Meeting({ m, onDeleted, onUpdated }) {
             >
               Really delete
             </button>
-            <button style={small} onClick={() => setConfirming(false)} disabled={busy}>
+            <button
+              className="btn btn-sm"
+              onClick={() => setConfirming(false)}
+              disabled={busy}
+            >
               Keep
             </button>
           </>
         ) : (
-          <button style={danger} onClick={() => setConfirming(true)} disabled={busy}>
+          <button
+            className="btn btn-sm btn-danger"
+            onClick={() => setConfirming(true)}
+            disabled={busy}
+          >
             Delete
           </button>
         )}
       </div>
 
-      <div style={{ ...errStyle, textAlign: "left", marginTop: 8 }}>{err}</div>
+      <div className="err err-left" style={{ marginTop: 10 }}>
+        {err}
+      </div>
 
       {hostLink && (
-        <div style={{ marginTop: 12 }}>
+        <div className="divider">
           <Copyable
-            caption="New host link (the previous one no longer works)"
+            caption="New host link — the previous one no longer works"
             value={hostLink}
           />
         </div>
@@ -340,27 +365,25 @@ function Edit({ m, onSaved }) {
   }
 
   return (
-    <form
-      onSubmit={save}
-      style={{
-        ...stack,
-        marginTop: 16,
-        paddingTop: 16,
-        borderTop: "1px solid #262626",
-      }}
-    >
-      <label style={label}>Title</label>
-      <input style={input} value={title} onChange={(e) => setTitle(e.target.value)} />
+    <form onSubmit={save} className="stack divider">
+      <label className="field-label">Title</label>
+      <input
+        className="field"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+      />
 
       {!changePw ? (
-        <button style={ghost} type="button" onClick={() => setChangePw(true)}>
+        <button className="btn btn-ghost" type="button" onClick={() => setChangePw(true)}>
           {m.hasPassword ? "Change or remove password" : "Add a password"}
         </button>
       ) : (
         <>
-          <label style={label}>New password (leave empty to remove it)</label>
+          <label className="field-label">
+            New password — leave empty to remove it
+          </label>
           <input
-            style={input}
+            className="field"
             type="password"
             autoComplete="new-password"
             value={pw}
@@ -369,10 +392,10 @@ function Edit({ m, onSaved }) {
         </>
       )}
 
-      <button style={button} type="submit" disabled={busy}>
+      <button className="btn" type="submit" disabled={busy}>
         {busy ? "Saving..." : "Save"}
       </button>
-      <div style={errStyle}>{err}</div>
+      <div className="err">{err}</div>
     </form>
   );
 }
@@ -381,24 +404,30 @@ function CopyButton({ value, labelText }) {
   const [done, setDone] = useState(false);
   return (
     <button
-      style={small}
+      className="btn btn-sm"
       onClick={async () => {
         const ok = await copy(value);
         setDone(ok);
         if (ok) setTimeout(() => setDone(false), 1500);
       }}
     >
-      {done ? "Copied" : labelText}
+      {done ? (
+        <>
+          <CheckIcon /> Copied
+        </>
+      ) : (
+        labelText
+      )}
     </button>
   );
 }
 
 function Copyable({ caption, value }) {
   return (
-    <div style={{ marginTop: 12 }}>
-      <div style={label}>{caption}</div>
-      <div style={row}>
-        <input style={{ ...input, flex: 1, minWidth: 200 }} readOnly value={value} />
+    <div className="copyable">
+      <div className="field-label">{caption}</div>
+      <div className="copy-field">
+        <input className="field" readOnly value={value} />
         <CopyButton value={value} labelText="Copy" />
       </div>
     </div>

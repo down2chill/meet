@@ -16,7 +16,9 @@ Self-hosted video meetings on Cloudflare RealtimeKit.
    preset names exactly (case sensitive). Check them under
    Realtime -> RealtimeKit -> Presets.
 
-3. **`src/ui.js`** — set `COMPANY` and `BRAND` to your own values.
+3. **`src/ui.js`** — set `COMPANY` and `SITE`, and `MEETING_TOKENS` if you
+   want the in-call UI in different colours. The rest of the look lives in
+   `src/theme.css`, and the logo, icons and fonts in `public/brand/`.
 
 ## Deploying
 
