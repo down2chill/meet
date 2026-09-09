@@ -25,12 +25,17 @@ const RtkMeeting = lazy(() =>
   }))
 );
 
-// Mint the token and initialise the SDK while the user is still typing their
-// name, so clicking Join is near-instant instead of a ~3s wait. The trade-off:
-// the camera is acquired on page load and held (the indicator light stays on),
-// and a participant token is minted even if they never join. Set to false to
-// do all of it on click instead.
-const PREWARM = true;
+// How long to let the camera and microphone warm up before giving up on them
+// and connecting anyway.
+//
+// This number matters more than it looks. The SDK's init() awaits getUserMedia
+// internally, so if we hand it audio/video while a permission prompt is still
+// sitting unanswered, the whole join stalls until the visitor clicks Allow.
+// Instead we wait a beat: if the browser already has permission it resolves in
+// a few hundred ms and they get a live preview, and if a prompt is open we stop
+// waiting and connect without devices. They land on the setup screen either
+// way, and the camera switches itself on if permission arrives later.
+const MEDIA_WAIT_MS = 2500;
 
 // tracing:false stops the SDK shipping OpenTelemetry logs. That endpoint sends
 // CORS headers Firefox complains about, once every few seconds, for telemetry
@@ -40,8 +45,6 @@ const SDK_MODULES = {
   tracing: false,
   devTools: { logs: false, logLevel: "off" },
 };
-
-const MEDIA = { audio: true, video: true };
 
 // Timing and diagnostics only when asked for: add ?debug=1 to the URL.
 const DEBUG = new URLSearchParams(location.search).has("debug");
@@ -59,27 +62,27 @@ const savedName = () => {
 };
 const rememberName = (n) => {
   try {
-    localStorage.setItem(NAME_KEY, n);
+    if (n) localStorage.setItem(NAME_KEY, n);
   } catch (e) {
     /* private mode */
   }
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const postJoin = (payload) => api("/api/join", { method: "POST", body: payload });
 
 export default function Join() {
   const [, initMeeting] = useRealtimeKitClient();
   const [client, setClient] = useState(null);
-  const [joined, setJoined] = useState(false);
-  const [isHost, setIsHost] = useState(false);
   const [needsPw, setNeedsPw] = useState(false);
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [name, setName] = useState(savedName);
   const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(true);
 
-  const warm = useRef({ ui: null, media: Promise.resolve(), ready: null });
+  const media = useRef(null);
   const started = useRef(false);
+  const clientRef = useRef(null);
+  const usedWarmMedia = useRef(false);
 
   const parts = location.pathname.split("/");
   const code = parts[parts.indexOf("j") + 1] || "";
@@ -93,140 +96,152 @@ export default function Join() {
   useEffect(() => {
     if (started.current) return; // StrictMode runs effects twice in dev
     started.current = true;
-
     const t0 = performance.now();
 
     // The meeting UI is the largest chunk on the page. Start it immediately.
     const ui = import("@cloudflare/realtimekit-react-ui");
 
-    // Acquires the devices once and hands the tracks to the SDK, instead of
-    // the old grab-then-stop warm-up that made init re-acquire them.
-    const media = initRTKMedia(MEDIA)
+    // Fired now so the permission prompt appears while the token request is in
+    // flight. Nothing ever blocks on this promise; it resolves to a media
+    // handler we can hand the SDK, or to null.
+    media.current = initRTKMedia({ audio: true, video: true })
       .catch((e) => {
-        // No camera on this machine: still warm the microphone. A denied
+        // No camera on this machine: still try for the microphone. A denied
         // permission is not retried, that would only prompt a second time.
         if (e && (e.name === "NotFoundError" || e.name === "OverconstrainedError"))
           return initRTKMedia({ audio: true, video: false });
         throw e;
       })
       .then(
-        () => log("media ready", Math.round(performance.now() - t0), "ms"),
-        (e) => log("media warm-up skipped:", e && e.name)
+        (h) => {
+          log("media ready", Math.round(performance.now() - t0), "ms");
+          return h;
+        },
+        (e) => {
+          log("media unavailable:", e && e.name);
+          return null;
+        }
       );
 
-    warm.current = { ui, media, ready: null };
-    if (!PREWARM || !code) return;
-
-    // The first attempt carries no password. The worker answers a protected
-    // room with needsPassword instead of a token, which is what decides
-    // whether to show the password field at all.
-    warm.current.ready = (async () => {
-      const d = await postJoin({ code, hostKey, name: savedName(), password: "" });
-
-      if (d.body.needsPassword) {
-        setNeedsPw(true);
-        return null;
-      }
-      if (d.status === 404) {
-        setErr("That meeting link is not valid.");
-        return null;
-      }
-      if (!d.body.authToken) return null;
-
-      await media; // tracks first, so init adopts them
-      const c = await initMeeting({
-        authToken: d.body.authToken,
-        defaults: MEDIA,
-        modules: SDK_MODULES,
-      });
-      if (!c) return null;
-
-      log("prewarm ready", Math.round(performance.now() - t0), "ms");
-      return { client: c, isHost: !!d.body.isHost };
-    })().catch((e) => {
-      log("prewarm failed:", e && e.message);
-      return null; // the click path will do it from scratch
-    });
+    start("", ui, t0);
   }, []);
 
-  async function coldJoin() {
-    const d = await postJoin({ code, hostKey, name, password: pw });
+  async function start(password, uiPromise, t0) {
+    setBusy(true);
+    setErr("");
 
-    if (d.body.needsPassword) {
-      setNeedsPw(true);
-      setErr(d.body.error || "This meeting needs a password.");
-      return null;
-    }
-    if (!d.body.authToken) {
-      setErr(d.body.error || "Could not join");
-      return null;
-    }
-
-    await warm.current.media;
-    const c = await initMeeting({
-      authToken: d.body.authToken,
-      defaults: MEDIA,
-      modules: SDK_MODULES,
-    });
-    if (!c) {
-      setErr("Could not start the meeting client.");
-      return null;
-    }
-    return { client: c, isHost: !!d.body.isHost };
-  }
-
-  async function go(e) {
-    if (e) e.preventDefault();
-    if (busy) return;
     if (!code) {
       setErr("No meeting code in the URL.");
+      setBusy(false);
       return;
     }
 
-    setBusy(true);
-    setErr("");
-    const t0 = performance.now();
-
     try {
-      const session =
-        (warm.current.ready && (await warm.current.ready)) || (await coldJoin());
-      if (!session) {
+      const d = await postJoin({ code, hostKey, name: savedName(), password });
+
+      if (d.body.needsPassword) {
+        setNeedsPw(true);
+        if (password) setErr(d.body.error || "Incorrect password");
+        setBusy(false);
+        return;
+      }
+      if (d.status === 404) {
+        setErr("That meeting link is not valid.");
+        setBusy(false);
+        return;
+      }
+      if (!d.body.authToken) {
+        setErr(d.body.error || "Could not join this meeting.");
         setBusy(false);
         return;
       }
 
-      // The prewarmed token was minted before we knew the name, so set the
-      // display name now. It is read when the client actually joins the room.
-      const trimmed = name.trim();
-      if (trimmed) {
-        rememberName(trimmed);
-        try {
-          session.client.self.setName(trimmed);
-        } catch (e2) {
-          log("setName failed:", e2 && e2.message);
-        }
+      const c = await connect(d.body.authToken, password);
+      if (!c) return;
+
+      if (uiPromise) await uiPromise;
+      clientRef.current = c;
+
+      // Connected without devices because a prompt was still open. If the
+      // visitor allows it after all, switch them on rather than making them
+      // hunt for the buttons. Attached after the client exists, and fires
+      // straight away if the promise has already settled.
+      if (!usedWarmMedia.current)
+        media.current.then((h) => {
+          if (!h) return;
+          log("permission arrived late, enabling devices");
+          c.self.enableAudio().catch(() => {});
+          c.self.enableVideo().catch(() => {});
+        });
+
+      // Whatever name they settle on in the setup screen is worth keeping, so
+      // the next meeting starts with it filled in.
+      try {
+        c.self.on("roomJoined", () => rememberName(c.self.name));
+      } catch (e) {
+        /* older SDK without the event */
       }
 
-      await warm.current.ui;
-
-      setClient(session.client);
-      setIsHost(session.isHost);
-      setJoined(true);
-      log("click to meeting UI:", Math.round(performance.now() - t0), "ms");
-    } catch (e2) {
-      setErr("Error: " + (e2 && e2.message ? e2.message : e2));
-      console.error(e2);
+      setClient(c);
+      log("ready in", Math.round(performance.now() - (t0 || 0)), "ms");
+    } catch (e) {
+      setErr("Error: " + (e && e.message ? e.message : e));
+      console.error(e);
       setBusy(false);
     }
   }
 
-  if (joined && client) {
+  async function connect(token, password) {
+    // Never await the media promise on its own: see MEDIA_WAIT_MS.
+    const handler = await Promise.race([media.current, sleep(MEDIA_WAIT_MS)]);
+
+    const withMedia = !!handler;
+    if (!withMedia) log("connecting without devices, they can be enabled on the setup screen");
+
+    const opts = {
+      authToken: token,
+      defaults: withMedia
+        ? { audio: true, video: true, mediaHandler: handler }
+        : { audio: false, video: false },
+      modules: SDK_MODULES,
+    };
+
+    let c = await initMeeting(opts).catch((e) => {
+      log("init failed:", e && e.message);
+      return null;
+    });
+
+    // A token can go stale while someone sits on a permission prompt, and a
+    // stale one fails at init. Mint a fresh one and try once more before
+    // showing an error.
+    if (!c) {
+      log("retrying with a fresh token");
+      const again = await postJoin({ code, hostKey, name: savedName(), password });
+      if (again.body.authToken)
+        c = await initMeeting({ ...opts, authToken: again.body.authToken }).catch(
+          () => null
+        );
+    }
+
+    if (!c) {
+      setErr("Could not connect to the meeting. Reload to try again.");
+      setBusy(false);
+      return null;
+    }
+
+    usedWarmMedia.current = withMedia;
+    return c;
+  }
+
+  if (client) {
     return (
       <RealtimeKitProvider value={client}>
         <Suspense fallback={<div style={centred}>Loading meeting...</div>}>
           <RtkMeeting
             meeting={client}
-            showSetupScreen={isHost}
+            // The setup screen is the entry room: name, camera preview and
+            // device pickers, and the natural place for a permission prompt.
+            showSetupScreen
             style={{ height: "100vh", width: "100vw" }}
           />
         </Suspense>
@@ -234,41 +249,47 @@ export default function Join() {
     );
   }
 
-  return (
-    <div style={centred}>
-      <div style={{ ...card, ...narrow }}>
-        <div style={brandStyle}>{COMPANY}</div>
-        <form onSubmit={go} style={stack}>
-          <label style={label} htmlFor="name">
-            Your name
-          </label>
-          <input
-            id="name"
-            style={input}
-            placeholder="Your name"
-            autoComplete="name"
-            autoFocus
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-          {needsPw && (
+  if (needsPw) {
+    return (
+      <div style={centred}>
+        <div style={{ ...card, ...narrow }}>
+          <div style={brandStyle}>{COMPANY}</div>
+          <form
+            style={stack}
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!busy) start(pw);
+            }}
+          >
+            <label style={label} htmlFor="pw">
+              This meeting has a password
+            </label>
             <input
+              id="pw"
               style={input}
               type="password"
               placeholder="Meeting password"
               autoComplete="off"
+              autoFocus
               value={pw}
               onChange={(e) => setPw(e.target.value)}
             />
-          )}
-          <button style={button} type="submit" disabled={busy}>
-            {busy ? "Joining..." : "Join meeting"}
-          </button>
-        </form>
-        <div style={{ ...errStyle, marginTop: 12 }}>{err}</div>
-        <div style={{ ...muted, marginTop: 4, textAlign: "center" }}>
-          Code {code}
+            <button style={button} type="submit" disabled={busy}>
+              {busy ? "Checking..." : "Continue"}
+            </button>
+          </form>
+          <div style={{ ...errStyle, marginTop: 12 }}>{err}</div>
         </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={centred}>
+      <div style={{ ...card, ...narrow, textAlign: "center" }}>
+        <div style={brandStyle}>{COMPANY}</div>
+        <div style={muted}>{err ? "" : "Connecting..."}</div>
+        <div style={{ ...errStyle, marginTop: 8 }}>{err}</div>
       </div>
     </div>
   );

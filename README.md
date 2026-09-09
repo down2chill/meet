@@ -83,9 +83,11 @@ Everything on `/admin`:
 - **New host link** — issues a fresh host key. Host keys are only ever stored
   as a hash, so an old one cannot be shown again; generating a new link is also
   how you revoke the previous one.
-- **Delete** — removes the KV record, so the link stops working immediately.
-  The meeting object on Cloudflare's side is left alone; it is unreachable
-  without the record.
+- **Delete** — removes the KV record, so the link stops working. The meeting
+  object on Cloudflare's side is left alone; it is unreachable without the
+  record. Allow up to a minute: an edge that already served that meeting can
+  keep its cached copy for `KV_CACHE_TTL`, which is set to KV's 60 second
+  minimum. Anyone already in the call stays in it.
 
 Creating a meeting used to be open to anyone who found the site. It is now
 behind this login.
@@ -136,26 +138,49 @@ a preflight the Worker never answers, so CSRF is not reachable. The cookie is
 
 ## How joining is kept fast
 
-The join page does the slow work up front, while the visitor is still typing
-their name:
+Opening `/j/<code>` goes straight to the meeting's setup screen: name, camera
+preview, microphone and device pickers, then Join. There is no separate name
+form in front of it, because the setup screen already asks for one.
 
-- the meeting UI bundle starts downloading on first render
-- `initRTKMedia` acquires the camera and microphone once and hands those exact
-  tracks to the SDK, so it never has to re-acquire them
-- a participant token is minted and the SDK is initialised in the background
+On load, and all at once: the meeting UI chunk starts downloading, the camera
+and microphone warm up, and a participant token is minted. Then the SDK
+connects and the setup screen appears.
 
-Clicking **Join** then only has to set the display name and mount the UI. Two
-consequences worth knowing about:
+**Nothing ever waits on a permission prompt.** This is the part that is easy to
+get wrong. The SDK's `init()` awaits `getUserMedia` internally, so handing it
+`audio: true, video: true` while a prompt is still open stalls the entire join
+until the visitor clicks Allow — they sit on a spinner with no idea that the
+thing blocking them is the dialog at the top of their screen.
 
-- the camera indicator light comes on while the name is being typed
-- a token is minted even for someone who never clicks Join, so they appear in
-  the meeting's participant list as `Guest`
+So the warm-up gets `MEDIA_WAIT_MS` (2.5s) and no more:
 
-Set `PREWARM = false` in `src/Join.jsx` to go back to doing all of it on click.
+- permission already granted: it resolves in a few hundred ms, and the SDK is
+  handed those exact tracks rather than re-acquiring them
+- a prompt is open, or devices are missing or blocked: we stop waiting and
+  connect with `audio: false, video: false`
 
-Rooms with a password skip the prewarm, because there is nothing to mint a
-token with until the password is entered. The password field only appears when
-the room actually has one.
+Either way the setup screen appears. If permission arrives late, the camera and
+microphone switch themselves on. If it is refused, the buttons on the setup
+screen are there to try again.
+
+A token that has gone stale while someone sat on a prompt fails at `init()`, so
+a fresh one is minted and it retries once before showing an error.
+
+Rooms with a password show a password field first, since there is no token to
+mint until it is entered.
+
+### Why the visitor may be asked for the camera on every reload
+
+Chrome and Firefox remember a granted camera permission per site, so normally
+this happens once. Two cases where it does not:
+
+- **private / incognito windows** discard permissions when the window closes,
+  and some builds re-ask on every page load
+- **Safari** defaults camera and microphone to "Ask" per site, so it prompts
+  each session unless the visitor sets Allow in Settings for that site
+
+Neither is something the page can change. The important part is that being
+asked no longer holds up the join.
 
 The RealtimeKit SDK is a lazy chunk, so `/` and `/new` never download it. Those
 pages load about 48 kB gzipped; the SDK arrives only on `/j/<code>`.
@@ -163,6 +188,21 @@ pages load about 48 kB gzipped; the SDK arrives only on `/j/<code>`.
 The dashboard renders from a single KV `list` call. Title, creation time and
 the password flag are stored as key metadata, which `list` returns inline, so
 showing a hundred meetings costs one read rather than a hundred and one.
+
+After a create, edit or delete the dashboard updates its own list from the
+response instead of re-fetching. That is one fewer round trip, and it avoids a
+race: KV's list index trails writes by a few seconds, so a re-fetch can still
+show a meeting you just deleted, or miss one you just made. Use **Refresh** if
+you want to re-read from KV.
+
+## A KV consistency caveat
+
+Editing the same meeting twice inside 60 seconds can lose the first change.
+Each edit reads the record, changes a field and writes it back, and that read
+can be served from a cache that has not yet seen the previous write. Changing
+the title and the password in one save is fine, because that is a single
+read-modify-write. This is inherent to Workers KV, not something the app can
+work around.
 
 ## Rate limits
 
@@ -187,4 +227,5 @@ setting `CSP = CSP_POLICY`.
 
 The three `@cloudflare/*` packages are pinned to 2.0.2. Bump them deliberately
 and re-test a real call; the SDK options this app relies on (`modules.tracing`,
-`initRTKMedia`, `self.setName`) are not covered by semver promises.
+`initRTKMedia`, `defaults.mediaHandler`, and the setup screen's own name field)
+are not covered by semver promises.
