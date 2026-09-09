@@ -2,16 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Down2Chill Meet</title>
-    <meta name="description" content="Video rooms for Down2Chill. Enter your meeting code and join." />
-    <meta name="robots" content="noindex" />
-    <meta name="theme-color" content="#06142e" />
-    <meta name="apple-mobile-web-app-title" content="Meet" />
-
-    <link rel="icon" type="image/png" sizes="48x48" href="/brand/favicon-48.png" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/brand/favicon-192.png" />
-    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png" />
 
     <!--
       The three hosts every join talks to. Opening the TCP + TLS connections
@@ -22,24 +14,15 @@
     <link rel="preconnect" href="https://location.realtime.cloudflare.com" crossorigin />
     <link rel="dns-prefetch" href="https://socket-edge.realtime.cloudflare.com" />
 
-    <!-- All three faces are used above the fold on every screen. -->
-    <link rel="preload" href="/brand/fonts/montserrat-var.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/brand/fonts/dm-mono-500.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/brand/fonts/dm-mono-400.woff2" as="font" type="font/woff2" crossorigin />
-
     <style>
-      /* Just enough to paint the right colour before theme.css arrives. */
       html,
       body,
       #root {
         margin: 0;
         height: 100%;
+        background: #080808;
         color: #fff;
-        font-family: "Montserrat", ui-sans-serif, system-ui, sans-serif;
-      }
-      /* on <html> only: body carries the gradient layer and must stay clear */
-      html {
-        background: #06142e;
+        font-family: system-ui, sans-serif;
       }
     </style>
   </head>
