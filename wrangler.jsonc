@@ -28,6 +28,11 @@
       "name": "JOIN_LIMIT",
       "namespace_id": "1002",
       "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      "name": "LOGIN_LIMIT",
+      "namespace_id": "1003",
+      "simple": { "limit": 8, "period": 60 }
     }
   ],
   "vars": {
