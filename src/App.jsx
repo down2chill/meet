@@ -1,4 +1,4 @@
-import { useState, lazy, Suspense } from "react";
+import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   useRealtimeKitClient,
   RealtimeKitProvider,
@@ -57,6 +57,24 @@ const errStyle = {
   wordBreak: "break-word",
 };
 
+// Stopwatch that prints a per-stage breakdown to the console.
+function makeTimer() {
+  const t0 = performance.now();
+  let last = t0;
+  const marks = [];
+  return {
+    mark(label) {
+      const now = performance.now();
+      marks.push([label, Math.round(now - last), Math.round(now - t0)]);
+      last = now;
+    },
+    print() {
+      console.log("--- join timing (step ms / total ms) ---");
+      marks.forEach(([l, step, total]) => console.log(l, step, "/", total));
+    },
+  };
+}
+
 export default function App() {
   const path = window.location.pathname;
   if (path.startsWith("/j/")) return <Join />;
@@ -66,19 +84,42 @@ export default function App() {
 function Join() {
   const [meeting, initMeeting] = useRealtimeKitClient();
   const [joined, setJoined] = useState(false);
+  const [isHost, setIsHost] = useState(false);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
   const [pw, setPw] = useState("");
+  const uiPreload = useRef(null);
+  const camWarm = useRef(null);
 
   const parts = window.location.pathname.split("/");
   const code = parts[parts.indexOf("j") + 1] || "";
   const hostKey =
     new URLSearchParams(window.location.search).get("host") || "";
 
+  // Start the two slowest things the moment the page renders, while the
+  // user is still typing their name. Neither blocks the UI.
+  useEffect(() => {
+    uiPreload.current = import("@cloudflare/realtimekit-react-ui");
+
+    camWarm.current = navigator.mediaDevices
+      .getUserMedia({ audio: true, video: true })
+      .then((stream) => {
+        // Release immediately. The permission grant and device wake-up are
+        // what we wanted; the SDK acquires its own tracks afterwards.
+        stream.getTracks().forEach((t) => t.stop());
+        return true;
+      })
+      .catch((e) => {
+        console.log("camera warm-up skipped:", e.name);
+        return false;
+      });
+  }, []);
+
   async function go() {
     setBusy(true);
     setErr("Connecting...");
+    const timer = makeTimer();
     try {
       if (!code) {
         setErr("No meeting code in the URL.");
@@ -86,16 +127,14 @@ function Join() {
         return;
       }
 
-      // Start downloading the meeting UI bundle immediately, in parallel
-      // with the token request, so neither waits on the other.
-      const uiPreload = import("@cloudflare/realtimekit-react-ui");
-
       const r = await fetch("/api/join", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code, hostKey, name, password: pw }),
       });
       const d = await r.json();
+      timer.mark("token from worker");
+
       if (!d.authToken) {
         setErr(d.error || "Could not join");
         console.log(d);
@@ -103,15 +142,23 @@ function Join() {
         return;
       }
 
+      setIsHost(!!hostKey);
+
+      await camWarm.current;
+      timer.mark("camera ready");
+
       await initMeeting({
         authToken: d.authToken,
         defaults: { audio: true, video: true },
       });
+      timer.mark("sdk init");
 
-      await uiPreload;
+      await uiPreload.current;
+      timer.mark("ui bundle");
 
       setErr("");
       setJoined(true);
+      timer.print();
     } catch (e) {
       setErr("Error: " + (e && e.message ? e.message : e));
       console.error(e);
@@ -125,7 +172,7 @@ function Join() {
         <Suspense fallback={<div style={box}>Loading meeting...</div>}>
           <RtkMeeting
             meeting={meeting}
-            showSetupScreen={true}
+            showSetupScreen={isHost}
             style={{ height: "100vh", width: "100vw" }}
           />
         </Suspense>
@@ -142,6 +189,9 @@ function Join() {
         autoComplete="name"
         value={name}
         onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !busy) go();
+        }}
       />
       <input
         style={input}
@@ -149,9 +199,12 @@ function Join() {
         placeholder="Password (if required)"
         value={pw}
         onChange={(e) => setPw(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !busy) go();
+        }}
       />
       <button style={button} onClick={go} disabled={busy}>
-        Join meeting
+        {busy ? "Joining..." : "Join meeting"}
       </button>
       <div style={errStyle}>{err}</div>
     </div>
