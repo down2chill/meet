@@ -1,21 +1,28 @@
-/* What to show when the browser is blocking the camera or microphone.
+/* What to show when the camera or microphone did not start.
 
-   Worth being clear about the constraint: a page cannot un-deny its own
-   permission. navigator.permissions.revoke() was removed from the platform
+   The distinction that decides everything here is dismissed vs blocked.
+
+   A *dismissed* prompt (closed, swiped away, ignored) leaves the permission at
+   "ask". Asking again really does bring the prompt straight back, no reload
+   involved -- so that case is simply a button.
+
+   A *blocked* one does not. permissions.revoke() was removed from the platform
    years ago, and clearing localStorage, cookies or the whole origin's storage
-   does not touch permissions: browsers keep those in the profile, not in
-   site storage. So "wipe the page data" would change nothing, and neither does
-   the reload the SDK suggests: a reload re-asks only if the browser was never
-   told "block", and once it has been, it stays blocked until the person
-   changes it.
+   does not touch permissions: browsers keep those in the profile, not in site
+   storage. So wiping page data would change nothing, and neither does the
+   reload the SDK suggests -- a browser told to block stops asking, full stop.
+   Only the person can undo it, in their own browser's settings.
 
-   What we can do is stop showing them a dead end: say plainly what happened,
-   point at the control that actually fixes it, and retry in place so they
-   never have to reload and lose the room. */
+   Either way the retry runs against the live meeting. enableVideo/enableAudio
+   acquire the device and publish it; they do not touch the connection, so the
+   call carries on underneath this panel. */
 
 import { useState } from "react";
 
-const KIND_LABEL = { video: "Camera", audio: "Microphone" };
+const KIND = {
+  video: { label: "Camera", lower: "camera" },
+  audio: { label: "Microphone", lower: "microphone" },
+};
 
 // Rough, and deliberately so: this only picks which sentence to show, and the
 // fallback sentence is true everywhere.
@@ -45,27 +52,66 @@ function whereToLook() {
 function systemHint() {
   const ua = navigator.userAgent;
   if (/Mac OS X/i.test(ua))
-    return "Open System Settings > Privacy & Security and give your browser access, then come back.";
+    return "Open System Settings > Privacy & Security and give your browser access, then come back and press Try again.";
   if (/Windows/i.test(ua))
-    return "Open Settings > Privacy & security > Camera and microphone and give your browser access, then come back.";
-  return "Give your browser access in your device's privacy settings, then come back.";
+    return "Open Settings > Privacy & security and give your browser access, then come back and press Try again.";
+  return "Give your browser access in your device's privacy settings, then come back and press Try again.";
+}
+
+function copyFor(state, k) {
+  switch (state) {
+    case "dismissed":
+      return {
+        title: "The " + k.lower + " prompt was closed",
+        body:
+          "Nothing is blocked — your browser is still willing to ask. Press the button below and the prompt comes straight back.",
+        action: "Ask again",
+      };
+    case "system":
+      return {
+        title: "Your device is blocking the " + k.lower,
+        body: systemHint(),
+        action: "Try again",
+      };
+    case "busy":
+      return {
+        title: "The " + k.lower + " is already in use",
+        body:
+          "Another app or browser tab has hold of it. Close whatever else is using it, then try again.",
+        action: "Try again",
+      };
+    case "missing":
+      return {
+        title: "No " + k.lower + " found",
+        body:
+          "Nothing is connected that we can use. Plug something in, then try again.",
+        action: "Try again",
+      };
+    default: // "browser"
+      return {
+        title: "This browser is blocking the " + k.lower,
+        body:
+          "Once a browser has been told to block, it stops asking, and reloading will not bring the prompt back. " +
+          whereToLook(),
+        action: "Try again",
+      };
+  }
 }
 
 export default function PermissionBlocked({ info, client, onDismiss }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
-  const label = KIND_LABEL[info.kind] || "Camera";
-  const system = info.scope === "system";
+  const k = KIND[info.kind] || KIND.video;
+  const { title, body, action } = copyFor(info.state, k);
 
   async function retry() {
     if (busy) return;
     setBusy(true);
     setFailed(false);
     try {
-      // No reload needed: the moment the setting is changed, this call gets
-      // the device. If it is still blocked it rejects immediately, which is
-      // how we know to keep the panel up.
+      // Acquires the device and publishes it on the meeting that is already
+      // running. Nothing here reconnects, so the call is not interrupted.
       if (info.kind === "audio") await client.self.enableAudio();
       else await client.self.enableVideo();
       onDismiss();
@@ -77,40 +123,44 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
   }
 
   return (
-    <div className="perm-overlay" role="dialog" aria-modal="true" aria-label={label + " blocked"}>
+    <div
+      className="perm-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label={k.label + " unavailable"}
+    >
       <div className="card narrow perm-card">
         <div className="eyebrow" style={{ marginBottom: 8 }}>
-          {label} blocked
+          {k.label}
         </div>
         <div className="card-title" style={{ fontSize: 20, marginBottom: 10 }}>
-          {system
-            ? "Your device is blocking the " + label.toLowerCase()
-            : "This browser is blocking the " + label.toLowerCase()}
+          {title}
         </div>
 
         <p className="muted" style={{ marginBottom: 14 }}>
-          {system
-            ? systemHint()
-            : "Once a browser has been told to block, it stops asking, and reloading will not bring the prompt back. " +
-              whereToLook()}
+          {body}
         </p>
 
         <div className="stack">
           <button className="btn" onClick={retry} disabled={busy}>
-            {busy ? "Checking..." : "Try again"}
+            {busy ? "Asking..." : action}
           </button>
           <button className="btn btn-ghost" onClick={onDismiss} disabled={busy}>
-            Continue without it
+            Not now
           </button>
         </div>
 
         <div className="err" style={{ marginTop: 14 }}>
-          {failed ? "Still blocked. The setting may not have saved yet." : ""}
+          {failed
+            ? info.state === "dismissed"
+              ? "Still nothing. It may have been blocked rather than dismissed."
+              : "Still no luck. The setting may not have saved yet."
+            : ""}
         </div>
 
         <div className="hint" style={{ marginTop: 6 }}>
-          Allow it, then press Try again — no reload needed. You can also stay in the meeting without your{" "}
-          {label.toLowerCase()}.
+          You stay in the meeting either way. This only turns on your own{" "}
+          {k.lower}, and never disconnects the call.
         </div>
       </div>
     </div>

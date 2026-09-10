@@ -21,27 +21,34 @@ import PermissionBlocked from "./Permission.jsx";
 // extendConfig merges onto the SDK's default UI config, so we only state the
 // handful of things that differ: our palette, our font, our logo. Each call
 // deep-clones that default, so every config handed out here is independent.
+// Which way the video should be fitted depends on how the device is held.
+//
+// Upright, the camera shoots a tall frame into a tile that is nothing like as
+// tall, and 'cover' throws most of it away — that one needs 'contain', bars and
+// all. Turned sideways, camera and tile agree, and 'cover' fills the tile
+// exactly: 'contain' there would add bars for no reason. So it follows the
+// orientation instead of being fixed either way.
+const currentFit = () =>
+  window.matchMedia("(orientation: portrait)").matches ? "contain" : "cover";
+
 const brandedConfig = () =>
   extendConfig({
     designTokens: MEETING_TOKENS,
-    config: {
-      // The SDK defaults to 'cover', which crops every tile to fill it — a
-      // phone held upright loses most of the frame. 'contain' letterboxes
-      // instead: bars down the sides, but the whole picture is there.
-      videoFit: "contain",
-    },
+    config: { videoFit: currentFit() },
   });
 const baseConfig = brandedConfig();
 
 export default function Meeting({ client }) {
   const addon = useRef(null);
-  const config = useVideoBackground(client, addon);
+  const [config, setConfig] = useVideoBackground(client, addon);
   const [blocked, setBlocked] = useBlockedMedia(client);
+  const joined = useJoined(client);
 
+  useVideoFit(setConfig);
   useCameraSwitchFix(client, addon);
 
   return (
-    <div className="meeting-root">
+    <div className={joined ? "meeting-root" : "meeting-root setup"}>
       <RealtimeKitProvider value={client}>
         <RtkMeeting
           meeting={client}
@@ -136,10 +143,17 @@ function useCameraSwitchFix(client, addonRef) {
   }, [client, addonRef]);
 }
 
-// The SDK reports a blocked device through these two events. DENIED is the
-// browser refusing, SYSTEM_DENIED is the operating system refusing on the
-// browser's behalf, and they need different advice.
-const BLOCKED_SCOPE = { DENIED: "browser", SYSTEM_DENIED: "system" };
+// The SDK reports device trouble through these two events. The distinction
+// that matters most is CANCELED vs DENIED: a dismissed prompt leaves the
+// permission at "ask", so requesting again really does bring the prompt back,
+// while a blocked one does not and no amount of asking (or reloading) will.
+const MEDIA_STATE = {
+  CANCELED: "dismissed",
+  DENIED: "browser",
+  SYSTEM_DENIED: "system",
+  COULD_NOT_START: "busy",
+  NO_DEVICES_AVAILABLE: "missing",
+};
 
 function useBlockedMedia(client) {
   const [blocked, setBlocked] = useState(null);
@@ -147,8 +161,8 @@ function useBlockedMedia(client) {
   useEffect(() => {
     const onPermission = ({ message, kind }) => {
       if (kind === "screenshare") return; // its own flow, never silently denied
-      const scope = BLOCKED_SCOPE[message];
-      if (scope) setBlocked({ scope, kind });
+      const state = MEDIA_STATE[message];
+      if (state) setBlocked({ state, kind });
       else if (message === "ACCEPTED") setBlocked(null);
     };
 
@@ -171,6 +185,8 @@ function useBlockedMedia(client) {
  */
 function useVideoBackground(client, addonRef) {
   const [config, setConfig] = useState(baseConfig);
+  // brandedConfig() reads the live orientation, so the addon's own setConfig
+  // below cannot stomp on whatever useVideoFit has settled on.
 
   useEffect(() => {
     // Segmentation needs WebGL, and the SDK does not support it on iOS at all.
@@ -234,7 +250,48 @@ function useVideoBackground(client, addonRef) {
     };
   }, [client, addonRef]);
 
-  return config;
+  return [config, setConfig];
+}
+
+/**
+ * Keeps config.videoFit in step with how the phone is being held. Patching the
+ * one field rather than rebuilding keeps the addon's control-bar buttons in
+ * place; the new top-level object is what makes the SDK notice at all.
+ */
+function useVideoFit(setConfig) {
+  useEffect(() => {
+    const mq = window.matchMedia("(orientation: portrait)");
+    const apply = () => {
+      const fit = currentFit();
+      setConfig((prev) =>
+        prev.config && prev.config.videoFit === fit
+          ? prev
+          : { ...prev, config: { ...prev.config, videoFit: fit } }
+      );
+    };
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, [setConfig]);
+}
+
+// Before the Join button is pressed we are on the SDK's setup screen, which
+// needs different treatment on a short landscape viewport. See theme.css.
+function useJoined(client) {
+  const [joined, setJoined] = useState(() => !!client.self.roomJoined);
+
+  useEffect(() => {
+    const on = () => setJoined(true);
+    const off = () => setJoined(false);
+    client.self.addListener("roomJoined", on);
+    client.self.addListener("roomLeft", off);
+    return () => {
+      client.self.removeListener("roomJoined", on);
+      client.self.removeListener("roomLeft", off);
+    };
+  }, [client]);
+
+  return joined;
 }
 
 /**

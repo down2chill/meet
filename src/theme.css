@@ -239,6 +239,17 @@ h1, h2, h3, p { margin: 0; }
 /* the SDK paints the whole viewport; nothing of ours shows behind it */
 .meeting-root { position: fixed; inset: 0; background: #050f24; }
 
+/* A phone turned sideways leaves barely 360px of height. The SDK's setup
+   screen lays out for something taller and simply clips: the name field and
+   the Join button end up off the bottom with no way to reach them. Give the
+   pane a floor and let it scroll to reach the rest. Only before joining --
+   .setup is dropped on roomJoined, and the call itself copes with a short
+   viewport on its own. */
+@media (orientation: landscape) and (max-height: 560px) {
+  .meeting-root.setup { overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+  .meeting-root.setup rtk-meeting { min-height: 560px; }
+}
+
 /* ---------- footer ---------- */
 .foot { margin-top: 30px; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 20px; }
 .foot a { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: rgba(255,255,255,.55); text-decoration: none; padding: 10px 2px; transition: color .15s ease; }
