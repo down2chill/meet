@@ -187,21 +187,6 @@ export function pressAudioDialog() {
   return true;
 }
 
-// Presets decide what a participant may publish, and a guest preset commonly
-// allows audio but not video. Asking the SDK to enable something the preset
-// forbids ends in a publish the server rejects, so check first. Deliberately
-// permissive: only an explicit no counts as a no, anything unrecognised is
-// left to the SDK exactly as before.
-export function canProduce(self, kind) {
-  try {
-    const p = self.permissions;
-    const v = kind === "audio" ? p.canProduceAudio : p.canProduceVideo;
-    return v !== false && v !== "NOT_ALLOWED";
-  } catch (e) {
-    return true;
-  }
-}
-
 // The virtual backgrounds offered in the meeting, alongside blur. They are
 // ours, in public/brand/backgrounds, rendered from the same gradient the rest
 // of the app uses. Drop more files in that folder and list them here.
