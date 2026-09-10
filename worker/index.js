@@ -274,7 +274,7 @@ async function createRoom(request, env, url) {
   const title = clean(body.title, MAX_TITLE) || "Meeting";
   const password = str(body.password, MAX_PASSWORD);
 
-  const res = await cfApi(env, "/meetings", "POST", { title, config: { viewType: "GROUP_CALL" } });
+  const res = await cfApi(env, "/meetings", "POST", { title });
   const meetingId = res.body && res.body.data && res.body.data.id;
   if (!res.ok || !meetingId) {
     console.error("create meeting failed", res.status, JSON.stringify(res.body));
