@@ -60,10 +60,14 @@ export default function Meeting({ client }) {
           // The setup screen is the entry room: name, camera preview and
           // device pickers, and the natural place for a permission prompt.
           showSetupScreen
+          // mode="fill" makes the SDK style its host position:relative instead
+          // of the default fixed, so it sizes to this container -- which is why
+          // it needs an explicit height. Do not move this into a stylesheet: an
+          // outer rule targeting the host also overrides the :host display:flex
+          // the meeting UI is built on, and setting display there collapses the
+          // entire layout, self-view included.
           mode="fill"
-          // Sizing lives in theme.css, not here: an inline style outranks every
-          // stylesheet rule, and the short-landscape case below has to be able
-          // to override the height.
+          style={{ height: "100%", width: "100%" }}
         />
       </RealtimeKitProvider>
 

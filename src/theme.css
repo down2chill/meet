@@ -238,33 +238,26 @@ h1, h2, h3, p { margin: 0; }
 
 /* the SDK paints the whole viewport; nothing of ours shows behind it */
 .meeting-root { position: fixed; inset: 0; background: #050f24; }
-.meeting-root rtk-meeting { display: block; height: 100%; width: 100%; }
 
 /* A phone turned sideways leaves barely 360px of height. The SDK's setup screen
    lays out for something taller and simply clips, so the Join button ends up
    below the fold with no way to reach it.
 
-   The part that makes this awkward: rtk-meeting styles its own :host as
-   `position: fixed; inset: 0`. A fixed element is anchored to the viewport and
-   out of flow, so it is not inside our scroller at all -- giving the parent
-   overflow, or the element a height, achieves exactly nothing. It has to be put
-   back in flow first, which an outer-document rule is allowed to do: styles
-   targeting a host element beat that element's own :host rules.
+   mode="fill" already leaves the host position:relative and in flow, so all it
+   needs is a height taller than the viewport and a parent that scrolls. The
+   !important is to beat the element's own inline height:100%, and it is kept to
+   that one property on purpose: an outer rule that touches display or position
+   here would fight the :host styles the meeting UI is built on.
 
-   Then a definite height gives the SDK room to lay out, and the parent has
-   something to scroll. Only before joining -- .setup is dropped on roomJoined,
-   and the call is meant to be fixed and full-bleed. */
+   Only before joining -- .setup is dropped on roomJoined, and the call itself
+   copes with a short viewport. */
 @media (orientation: landscape) and (max-height: 620px) {
   .meeting-root.setup {
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
   }
-  .meeting-root.setup rtk-meeting {
-    position: relative;
-    inset: auto;
-    height: 620px;
-  }
+  .meeting-root.setup rtk-meeting { height: 620px !important; }
 }
 
 /* ---------- footer ---------- */
