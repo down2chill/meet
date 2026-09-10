@@ -2,7 +2,7 @@
    largest chunk we ship — stays out of every other screen's download, and so
    the brand tokens are built in the same chunk that consumes them. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RealtimeKitProvider } from "@cloudflare/realtimekit-react";
 import {
   RtkMeeting,
@@ -16,15 +16,29 @@ import {
   loadBackground,
   backgroundEffectsSupported,
 } from "./ui.js";
+import PermissionBlocked from "./Permission.jsx";
 
 // extendConfig merges onto the SDK's default UI config, so we only state the
 // handful of things that differ: our palette, our font, our logo. Each call
 // deep-clones that default, so every config handed out here is independent.
-const brandedConfig = () => extendConfig({ designTokens: MEETING_TOKENS });
+const brandedConfig = () =>
+  extendConfig({
+    designTokens: MEETING_TOKENS,
+    config: {
+      // The SDK defaults to 'cover', which crops every tile to fill it — a
+      // phone held upright loses most of the frame. 'contain' letterboxes
+      // instead: bars down the sides, but the whole picture is there.
+      videoFit: "contain",
+    },
+  });
 const baseConfig = brandedConfig();
 
 export default function Meeting({ client }) {
-  const config = useVideoBackground(client);
+  const addon = useRef(null);
+  const config = useVideoBackground(client, addon);
+  const [blocked, setBlocked] = useBlockedMedia(client);
+
+  useCameraSwitchFix(client, addon);
 
   return (
     <div className="meeting-root">
@@ -43,8 +57,110 @@ export default function Meeting({ client }) {
           style={{ height: "100%", width: "100%" }}
         />
       </RealtimeKitProvider>
+
+      {blocked && (
+        <PermissionBlocked
+          info={blocked}
+          client={client}
+          onDismiss={() => setBlocked(null)}
+        />
+      )}
     </div>
   );
+}
+
+/**
+ * Switching camera leaves the preview black until something else forces a
+ * re-render — toggling Mirror is the usual accidental cure.
+ *
+ * The SDK's tiles (rtk-participant-setup, and the in-call tile) cache the last
+ * `videoUpdate` payload and only re-attach the <video> element's srcObject when
+ * a new one arrives. Changing device tears the old track down and builds a new
+ * one, and the events fired around that swap can leave the cached payload
+ * describing the torn-down state — a stopped track, or videoEnabled:false,
+ * which also drops the tile's `visible` class. Nothing corrects it afterwards,
+ * so it stays black until a re-render re-reads the live values.
+ *
+ * So we re-emit `videoUpdate` ourselves, built from the SDK's own live getters.
+ * It stops and starts nothing and republishes nothing — it says only what is
+ * already true, just says it again once the swap has settled. Fired twice
+ * because the SDK's own track-change handler is async and can land after the
+ * first one.
+ *
+ * Note the emit rather than self.setVideoEnabled(true), which looks like the
+ * tidier call and is in the public types: Self overrides `videoEnabled` with a
+ * getter and no setter, so the setter it inherits from Participant would throw
+ * on assignment. The SDK only ever calls it on remote participants.
+ */
+function useCameraSwitchFix(client, addonRef) {
+  useEffect(() => {
+    const timers = [];
+    const at = (ms, fn) => timers.push(setTimeout(fn, ms));
+
+    const resync = () => {
+      const self = client.self;
+      if (!self.videoEnabled || !self.videoTrack) return;
+      self.emit("videoUpdate", {
+        videoEnabled: self.videoEnabled,
+        videoTrack: self.videoTrack,
+      });
+    };
+
+    // A background effect builds its pipeline around the track it was handed.
+    // The new camera is a different track, so the effect has to be re-applied
+    // or it renders from a source that no longer produces frames.
+    const reapplyBackground = () => {
+      const a = addonRef.current;
+      if (!a) return;
+      const mode = a.currentBackgroundMode;
+      if (!mode || mode === "none") return;
+      const p =
+        mode === "blur"
+          ? a.applyBlurBackground()
+          : a.applyVirtualBackground(a.currentBackgroundURL);
+      Promise.resolve(p).catch(() => {});
+    };
+
+    const onDevice = ({ device }) => {
+      if (!device || device.kind !== "videoinput") return;
+      at(0, resync);
+      at(500, resync);
+      at(600, reapplyBackground);
+    };
+
+    client.self.addListener("deviceUpdate", onDevice);
+    return () => {
+      client.self.removeListener("deviceUpdate", onDevice);
+      timers.forEach(clearTimeout);
+    };
+  }, [client, addonRef]);
+}
+
+// The SDK reports a blocked device through these two events. DENIED is the
+// browser refusing, SYSTEM_DENIED is the operating system refusing on the
+// browser's behalf, and they need different advice.
+const BLOCKED_SCOPE = { DENIED: "browser", SYSTEM_DENIED: "system" };
+
+function useBlockedMedia(client) {
+  const [blocked, setBlocked] = useState(null);
+
+  useEffect(() => {
+    const onPermission = ({ message, kind }) => {
+      if (kind === "screenshare") return; // its own flow, never silently denied
+      const scope = BLOCKED_SCOPE[message];
+      if (scope) setBlocked({ scope, kind });
+      else if (message === "ACCEPTED") setBlocked(null);
+    };
+
+    client.self.addListener("mediaPermissionUpdate", onPermission);
+    client.self.addListener("mediaPermissionError", onPermission);
+    return () => {
+      client.self.removeListener("mediaPermissionUpdate", onPermission);
+      client.self.removeListener("mediaPermissionError", onPermission);
+    };
+  }, [client]);
+
+  return [blocked, setBlocked];
 }
 
 /**
@@ -53,7 +169,7 @@ export default function Meeting({ client }) {
  * button. Returns the UI config to render with: the plain branded one until the
  * addon is ready, then the one with the control in it.
  */
-function useVideoBackground(client) {
+function useVideoBackground(client, addonRef) {
   const [config, setConfig] = useState(baseConfig);
 
   useEffect(() => {
@@ -88,6 +204,8 @@ function useVideoBackground(client) {
         return;
       }
 
+      addonRef.current = addon;
+
       // Two things about this line.
       //
       // The third argument is required: without it registerAddons builds on
@@ -110,10 +228,11 @@ function useVideoBackground(client) {
 
     return () => {
       cancelled = true;
+      addonRef.current = null;
       if (stopRestore) stopRestore();
       if (addon) addon.unregister();
     };
-  }, [client]);
+  }, [client, addonRef]);
 
   return config;
 }

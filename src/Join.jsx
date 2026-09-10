@@ -63,6 +63,8 @@ export default function Join() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(true);
 
+  const [slow, setSlow] = useState(false);
+
   const media = useRef(null);
   const started = useRef(false);
   const clientRef = useRef(null);
@@ -107,7 +109,12 @@ export default function Join() {
         }
       );
 
+    // Cold DNS + TLS to the meeting edge can take a while, Safari especially.
+    // After this long, say so, so a slow join does not read as a broken one.
+    const slowTimer = setTimeout(() => setSlow(true), 6000);
+
     start("", ui, t0);
+    return () => clearTimeout(slowTimer);
   }, []);
 
   async function start(password, uiPromise, t0) {
@@ -139,6 +146,12 @@ export default function Join() {
         setBusy(false);
         return;
       }
+
+      // The password was right. Drop the gate now rather than when the whole
+      // connect finishes: minting the token is the fast part, opening the
+      // meeting socket is not, and on a cold connection that left the button
+      // sitting on "Checking..." for long enough to look broken.
+      setNeedsPw(false);
 
       const c = await connect(d.body.authToken, password);
       if (!c) return;
@@ -300,6 +313,12 @@ export default function Join() {
                 {COMPANY} Meet
               </div>
               <div className="muted">Connecting you to the room...</div>
+              {slow && (
+                <div className="hint" style={{ marginTop: 10 }}>
+                  Still going. The first connection from a browser is the slow
+                  one; the next will be quicker.
+                </div>
+              )}
             </>
           )}
         </div>

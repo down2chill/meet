@@ -44,10 +44,17 @@
       The three hosts every join talks to. Opening the TCP + TLS connections
       while the page is still rendering takes that handshake off the critical
       path once the user clicks Join.
+
+      socket-edge carries the meeting WebSocket and used to be dns-prefetch
+      only, which resolves the name but leaves the TLS handshake on the join.
+      That is the slowest part of a cold first load, and Safari feels it most.
+      No crossorigin attribute here on purpose: the connection is used by a
+      WebSocket, not by a CORS fetch, so an anonymous-mode socket would warm
+      the wrong pool.
     -->
     <link rel="preconnect" href="https://api.realtime.cloudflare.com" crossorigin />
     <link rel="preconnect" href="https://location.realtime.cloudflare.com" crossorigin />
-    <link rel="dns-prefetch" href="https://socket-edge.realtime.cloudflare.com" />
+    <link rel="preconnect" href="https://socket-edge.realtime.cloudflare.com" />
 
     <!-- All three faces are used above the fold on every screen. -->
     <link rel="preload" href="/brand/fonts/montserrat-var.woff2" as="font" type="font/woff2" crossorigin />

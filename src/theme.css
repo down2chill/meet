@@ -223,6 +223,19 @@ h1, h2, h3, p { margin: 0; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Sits over the SDK's own UI when the browser or the OS is blocking a device.
+   The SDK's advice there is "reload", which cannot help once a permission has
+   been denied, so we cover it with something actionable. */
+.perm-overlay {
+  position: fixed; inset: 0; z-index: 2000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  background: rgba(3, 9, 24, .72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.perm-card { max-height: 100%; overflow-y: auto; }
+
 /* the SDK paints the whole viewport; nothing of ours shows behind it */
 .meeting-root { position: fixed; inset: 0; background: #050f24; }
 
