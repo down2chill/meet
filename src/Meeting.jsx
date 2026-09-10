@@ -8,6 +8,7 @@ import {
   RtkMeeting,
   extendConfig,
   registerAddons,
+  defaultLanguage,
 } from "@cloudflare/realtimekit-react-ui";
 import {
   MEETING_TOKENS,
@@ -15,6 +16,9 @@ import {
   saveBackground,
   loadBackground,
   backgroundEffectsSupported,
+  classifyClick,
+  markRejoin,
+  meetingCode,
 } from "./ui.js";
 import PermissionBlocked from "./Permission.jsx";
 
@@ -178,28 +182,32 @@ const MEDIA_STATE = {
 };
 
 // A permission failure only earns a dialog if it happened because the person
-// just asked for the device. Anything else -- the page's own warm-up, a retry
-// deep in the SDK -- gets the quiet alert instead. Without this the meeting
-// collects dialogs nobody asked for.
+// just pressed the camera or microphone toggle and was refused. Anything else
+// -- the page's own warm-up, escaping out of the browser's prompt, a retry deep
+// in the SDK -- gets the quiet alert instead. Without this the meeting collects
+// dialogs nobody asked for.
 const USER_ACTION_MS = 3000;
 
 function useBlockedMedia(client) {
   const [blocked, setBlocked] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
-  const lastGesture = useRef(0);
+  const lastToggle = useRef({ kind: null, at: 0 });
 
-  // Capture phase, so a tap on the SDK's own camera button counts even though
-  // it lives inside a shadow root and stops nothing on the way up.
+  // One capture-phase click listener reads the composed path, so it sees into
+  // the SDK's shadow roots. It notices two things: a press on a device toggle
+  // (which arms the dialog for that device), and a press on the SDK's own
+  // permissions-dialog Reload button, which must come back into the meeting
+  // rather than onto the setup screen. A generic gesture would not do here --
+  // pressing Escape to dismiss the browser's prompt is a keydown too, and that
+  // is exactly the moment the SDK reports the refusal.
   useEffect(() => {
-    const mark = () => {
-      lastGesture.current = Date.now();
+    const onClick = (e) => {
+      const c = classifyClick(e.composedPath(), defaultLanguage["cta.reload"]);
+      if (c.toggle) lastToggle.current = { kind: c.toggle, at: Date.now() };
+      if (c.reload) markRejoin(meetingCode());
     };
-    document.addEventListener("pointerdown", mark, true);
-    document.addEventListener("keydown", mark, true);
-    return () => {
-      document.removeEventListener("pointerdown", mark, true);
-      document.removeEventListener("keydown", mark, true);
-    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
   }, []);
 
   useEffect(() => {
@@ -213,8 +221,9 @@ function useBlockedMedia(client) {
       const state = MEDIA_STATE[message];
       if (!state) return;
       setBlocked({ state, kind });
-      // Only ever off the back of something they just did.
-      if (Date.now() - lastGesture.current < USER_ACTION_MS) setPanelOpen(true);
+      // Only ever off the back of pressing this device's own toggle.
+      const t = lastToggle.current;
+      if (t.kind === kind && Date.now() - t.at < USER_ACTION_MS) setPanelOpen(true);
     };
 
     client.self.addListener("mediaPermissionUpdate", onPermission);

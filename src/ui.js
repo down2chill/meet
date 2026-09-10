@@ -112,6 +112,33 @@ export async function probePermission(kind) {
   }
 }
 
+// What a click inside the meeting UI was aimed at, read off its composed path
+// so it sees through the SDK's shadow roots. Two things are worth knowing:
+//
+// - a press on the SDK's own permissions dialog's Reload button. That is a
+//   plain location.reload() we get no say in, and it should land back in the
+//   meeting rather than on the setup screen.
+// - a press on the camera or microphone toggle. A permission failure right
+//   after one of those is the person asking for the device and being refused,
+//   which is the only time a dialog about it is warranted.
+//
+// `reloadLabel` is the SDK's own text for that button; the dialog has a
+// Continue button beside it that must not count.
+export function classifyClick(path, reloadLabel) {
+  let inPermissions = false;
+  let reload = false;
+  let toggle = null;
+  for (const el of path) {
+    const tag = el && el.tagName;
+    if (!tag) continue;
+    if (tag === "RTK-PERMISSIONS-MESSAGE") inPermissions = true;
+    else if (tag === "RTK-BUTTON" && (el.textContent || "").trim() === reloadLabel) reload = true;
+    else if (tag === "RTK-CAMERA-TOGGLE") toggle = "video";
+    else if (tag === "RTK-MIC-TOGGLE") toggle = "audio";
+  }
+  return { reload: inPermissions && reload, toggle };
+}
+
 // Presets decide what a participant may publish, and a guest preset commonly
 // allows audio but not video. Asking the SDK to enable something the preset
 // forbids ends in a publish the server rejects, so check first. Deliberately
