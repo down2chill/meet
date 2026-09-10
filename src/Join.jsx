@@ -3,7 +3,14 @@ import {
   useRealtimeKitClient,
   initRTKMedia,
 } from "@cloudflare/realtimekit-react";
-import { COMPANY, api, meetingCode, consumeRejoin, canProduce } from "./ui.js";
+import {
+  COMPANY,
+  api,
+  meetingCode,
+  consumeRejoin,
+  canProduce,
+  probePermission,
+} from "./ui.js";
 import { Shell, TopBar, Footer, Waiting, LockIcon, ArrowIcon } from "./chrome.jsx";
 
 // The meeting and everything the SDK's UI kit drags in.
@@ -20,6 +27,16 @@ const Meeting = lazy(() => import("./Meeting.jsx"));
 // waiting and connect without devices. They land on the setup screen either
 // way, and the camera switches itself on if permission arrives later.
 const MEDIA_WAIT_MS = 2500;
+
+// ...unless a prompt is expected, in which case the wait is a person reading a
+// dialog rather than a network stall. Cutting them off at 2.5s means connecting
+// without devices and then acquiring them a second time -- and on a browser
+// that does not remember a grant (Firefox unless "Remember this decision" is
+// ticked, Safari by default) that second acquisition is a second prompt, right
+// after they just answered one. Waiting longer costs nothing when permission is
+// already granted, because the warm-up resolves in milliseconds and the race
+// ends there.
+const MEDIA_WAIT_PROMPT_MS = 12000;
 
 // tracing:false stops the SDK shipping OpenTelemetry logs. That endpoint sends
 // CORS headers Firefox complains about, once every few seconds, for telemetry
@@ -66,6 +83,7 @@ export default function Join() {
   const [slow, setSlow] = useState(false);
 
   const media = useRef(null);
+  const probe = useRef(null);
   const started = useRef(false);
   const clientRef = useRef(null);
   const usedWarmMedia = useRef(false);
@@ -95,7 +113,27 @@ export default function Join() {
     // Fired now so the permission prompt appears while the token request is in
     // flight. Nothing ever blocks on this promise; it resolves to a media
     // handler we can hand the SDK, or to null.
-    media.current = initRTKMedia({ audio: true, video: true })
+    // Ask the browser what it will actually give us before asking for it. A
+    // device that is already blocked will only reject, and requesting it just
+    // produces a failure the rest of the app then has to explain away. Browsers
+    // that will not answer (Firefox) report null and we ask for everything, as
+    // before.
+    probe.current = Promise.all([
+      probePermission("audio"),
+      probePermission("video"),
+    ]);
+
+    media.current = probe.current
+      .then(([audioState, videoState]) => {
+        const audio = audioState !== "denied";
+        const video = videoState !== "denied";
+        if (!audio && !video) {
+          log("camera and microphone are both blocked, skipping the warm-up");
+          return null;
+        }
+        if (!audio || !video) log("warm-up limited by a blocked device", { audio, video });
+        return initRTKMedia({ audio, video });
+      })
       .catch((e) => {
         // No camera on this machine: still try for the microphone. A denied
         // permission is not retried, that would only prompt a second time.
@@ -216,8 +254,17 @@ export default function Join() {
   }
 
   async function connect(token, password) {
+    // The probe settles almost immediately; it only decides how patient to be.
+    const [audioState, videoState] = await (probe.current || Promise.resolve([])).catch(
+      () => []
+    );
+    const expectPrompt = [audioState, videoState].some(
+      (v) => v === "prompt" || v === null || v === undefined
+    );
+    const wait = expectPrompt ? MEDIA_WAIT_PROMPT_MS : MEDIA_WAIT_MS;
+
     // Never await the media promise on its own: see MEDIA_WAIT_MS.
-    const handler = await Promise.race([media.current, sleep(MEDIA_WAIT_MS)]);
+    const handler = await Promise.race([media.current, sleep(wait)]);
 
     const withMedia = !!handler;
     if (!withMedia) log("connecting without devices, they can be enabled on the setup screen");

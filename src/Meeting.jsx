@@ -176,24 +176,39 @@ function useCameraSwitchFix(client, addonRef) {
 // meeting for it turns one unlucky moment into something that keeps coming
 // back. Anything not named here is left to the SDK.
 const MEDIA_STATE = {
-  CANCELED: "dismissed",
   DENIED: "browser",
   SYSTEM_DENIED: "system",
 };
 
+// A permission failure only earns a dialog if it happened because the person
+// just asked for the device. Anything else -- the page's own warm-up, a retry
+// deep in the SDK -- gets the quiet alert instead. Without this the meeting
+// collects dialogs nobody asked for.
+const USER_ACTION_MS = 3000;
+
 function useBlockedMedia(client) {
   const [blocked, setBlocked] = useState(null);
   const [panelOpen, setPanelOpen] = useState(false);
-  // The panel opens by itself once per device. These events repeat on every
-  // failed attempt, and a panel that keeps reappearing over a running call is
-  // worse than no panel; after the first time the alert is the way back in.
-  const announced = useRef({});
+  const lastGesture = useRef(0);
+
+  // Capture phase, so a tap on the SDK's own camera button counts even though
+  // it lives inside a shadow root and stops nothing on the way up.
+  useEffect(() => {
+    const mark = () => {
+      lastGesture.current = Date.now();
+    };
+    document.addEventListener("pointerdown", mark, true);
+    document.addEventListener("keydown", mark, true);
+    return () => {
+      document.removeEventListener("pointerdown", mark, true);
+      document.removeEventListener("keydown", mark, true);
+    };
+  }, []);
 
   useEffect(() => {
     const onPermission = ({ message, kind }) => {
       if (kind === "screenshare") return; // its own flow, never silently denied
       if (message === "ACCEPTED") {
-        announced.current[kind] = false;
         setBlocked((b) => (b && b.kind === kind ? null : b));
         setPanelOpen(false);
         return;
@@ -201,10 +216,8 @@ function useBlockedMedia(client) {
       const state = MEDIA_STATE[message];
       if (!state) return;
       setBlocked({ state, kind });
-      if (!announced.current[kind]) {
-        announced.current[kind] = true;
-        setPanelOpen(true);
-      }
+      // Only ever off the back of something they just did.
+      if (Date.now() - lastGesture.current < USER_ACTION_MS) setPanelOpen(true);
     };
 
     client.self.addListener("mediaPermissionUpdate", onPermission);
