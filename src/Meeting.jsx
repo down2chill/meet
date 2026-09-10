@@ -21,26 +21,20 @@ import {
   meetingCode,
   hideAudioDialog,
   pressAudioDialog,
+  deepQueryAll,
 } from "./ui.js";
 import PermissionBlocked from "./Permission.jsx";
 
 // extendConfig merges onto the SDK's default UI config, so we only state the
 // handful of things that differ: our palette, our font, our logo. Each call
 // deep-clones that default, so every config handed out here is independent.
-// Which way the video should be fitted depends on how the device is held.
-//
-// Upright, the camera shoots a tall frame into a tile that is nothing like as
-// tall, and 'cover' throws most of it away — that one needs 'contain', bars and
-// all. Turned sideways, camera and tile agree, and 'cover' fills the tile
-// exactly: 'contain' there would add bars for no reason. So it follows the
-// orientation instead of being fixed either way.
-const currentFit = () =>
-  window.matchMedia("(orientation: portrait)").matches ? "contain" : "cover";
-
+// The SDK's default: every tile fills itself and crops whatever does not fit.
+// Right for landscape video, wrong for a phone held upright, which is handled
+// per video in useFitByAspect below rather than with this one global switch.
 const brandedConfig = () =>
   extendConfig({
     designTokens: MEETING_TOKENS,
-    config: { videoFit: currentFit() },
+    config: { videoFit: "cover" },
   });
 const baseConfig = brandedConfig();
 
@@ -50,7 +44,7 @@ export default function Meeting({ client, skipSetup }) {
   const device = useBlockedMedia(client);
   const joined = useJoined(client);
 
-  useVideoFit(setConfig);
+  useFitByAspect();
   useCameraSwitchFix(client, addon);
   useAudioUnlock(client);
 
@@ -306,8 +300,6 @@ function useBlockedMedia(client) {
  */
 function useVideoBackground(client, addonRef) {
   const [config, setConfig] = useState(baseConfig);
-  // brandedConfig() reads the live orientation, so the addon's own setConfig
-  // below cannot stomp on whatever useVideoFit has settled on.
 
   useEffect(() => {
     // Segmentation needs WebGL, and the SDK does not support it on iOS at all.
@@ -375,25 +367,48 @@ function useVideoBackground(client, addonRef) {
 }
 
 /**
- * Keeps config.videoFit in step with how the phone is being held. Patching the
- * one field rather than rebuilding keeps the addon's control-bar buttons in
- * place; the new top-level object is what makes the SDK notice at all.
+ * A portrait video is shown whole; a landscape one fills its tile.
+ *
+ * Which way a tile should fit depends on the shape of the video *in* it, not on
+ * who is watching. A phone held upright publishes a tall frame, and a tile that
+ * covers it keeps a strip down the middle and throws the rest away -- on every
+ * viewer's screen, since each one fits with its own config. So the decision is
+ * made per <video>, from its own frame size: taller than wide gets contain,
+ * anything else keeps the SDK's cover. That holds for other people's tiles,
+ * the self view, and the setup preview alike.
+ *
+ * The SDK sets fit as a class on the video, inside a shadow root several deep;
+ * an inline object-fit outranks the class and survives its re-renders, and
+ * deepQueryAll reaches the elements. Tiles come and go as people join, so
+ * this looks again on a timer, and a frame that changes shape -- the sender
+ * turning their phone -- fires `resize` on the element and is refitted at once.
  */
-function useVideoFit(setConfig) {
+function useFitByAspect() {
   useEffect(() => {
-    const mq = window.matchMedia("(orientation: portrait)");
-    const apply = () => {
-      const fit = currentFit();
-      setConfig((prev) =>
-        prev.config && prev.config.videoFit === fit
-          ? prev
-          : { ...prev, config: { ...prev.config, videoFit: fit } }
-      );
+    const bound = new WeakSet();
+
+    const fitOne = (v) => {
+      if (!v.videoWidth || !v.videoHeight) return;
+      const portrait = v.videoHeight > v.videoWidth;
+      // Empty string removes the override, handing fit back to the class.
+      v.style.objectFit = portrait ? "contain" : "";
     };
-    apply();
-    mq.addEventListener("change", apply);
-    return () => mq.removeEventListener("change", apply);
-  }, [setConfig]);
+
+    const sweep = () => {
+      for (const v of deepQueryAll("video")) {
+        if (!bound.has(v)) {
+          bound.add(v);
+          v.addEventListener("loadedmetadata", () => fitOne(v));
+          v.addEventListener("resize", () => fitOne(v));
+        }
+        fitOne(v);
+      }
+    };
+
+    sweep();
+    const timer = setInterval(sweep, 750);
+    return () => clearInterval(timer);
+  }, []);
 }
 
 // Before the Join button is pressed we are on the SDK's setup screen, which
