@@ -38,7 +38,7 @@ const brandedConfig = () =>
   });
 const baseConfig = brandedConfig();
 
-export default function Meeting({ client }) {
+export default function Meeting({ client, skipSetup }) {
   const addon = useRef(null);
   const [config, setConfig] = useVideoBackground(client, addon);
   const [blocked, dismissBlocked] = useBlockedMedia(client);
@@ -59,7 +59,10 @@ export default function Meeting({ client }) {
           applyDesignSystem
           // The setup screen is the entry room: name, camera preview and
           // device pickers, and the natural place for a permission prompt.
-          showSetupScreen
+          // Skipped only on the reload we asked for to re-trigger a device
+          // prompt: false here makes the SDK join as soon as it is ready, so
+          // nobody has to press Join twice to get their camera back.
+          showSetupScreen={!skipSetup}
           // mode="fill" makes the SDK style its host position:relative instead
           // of the default fixed, so it sizes to this container -- which is why
           // it needs an explicit height. Do not move this into a stylesheet: an

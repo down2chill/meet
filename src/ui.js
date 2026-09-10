@@ -48,6 +48,62 @@ export const MEETING_TOKENS = {
   },
 };
 
+// The meeting code out of /j/<code>. Both the join flow and the device panel
+// need it, and neither should be parsing the URL itself.
+export function meetingCode() {
+  const parts = location.pathname.split("/");
+  return parts[parts.indexOf("j") + 1] || "";
+}
+
+// Reloading is the one thing that reliably brings a device prompt back: it
+// re-runs the whole media warm-up from scratch. The cost is landing on the
+// setup screen again, which this flag removes -- the reloaded page drops
+// straight back into the meeting.
+//
+// sessionStorage, and read exactly once: a link opened fresh, or reloaded by
+// hand later, must still get the setup screen. Only the reload we ourselves
+// asked for skips it.
+const REJOIN_KEY = "meet:rejoin";
+const REJOIN_TTL = 60000;
+
+export function markRejoin(code) {
+  try {
+    sessionStorage.setItem(REJOIN_KEY, JSON.stringify({ code, at: Date.now() }));
+  } catch (e) {
+    /* private mode: they get the setup screen, which is only a click */
+  }
+}
+
+export function consumeRejoin(code) {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(REJOIN_KEY) || "null");
+    sessionStorage.removeItem(REJOIN_KEY);
+    return !!v && v.code === code && Date.now() - v.at < REJOIN_TTL;
+  } catch (e) {
+    return false;
+  }
+}
+
+export function reloadForDevices(code) {
+  markRejoin(code);
+  location.reload();
+}
+
+// Presets decide what a participant may publish, and a guest preset commonly
+// allows audio but not video. Asking the SDK to enable something the preset
+// forbids ends in a publish the server rejects, so check first. Deliberately
+// permissive: only an explicit no counts as a no, anything unrecognised is
+// left to the SDK exactly as before.
+export function canProduce(self, kind) {
+  try {
+    const p = self.permissions;
+    const v = kind === "audio" ? p.canProduceAudio : p.canProduceVideo;
+    return v !== false && v !== "NOT_ALLOWED";
+  } catch (e) {
+    return true;
+  }
+}
+
 // The virtual backgrounds offered in the meeting, alongside blur. They are
 // ours, in public/brand/backgrounds, rendered from the same gradient the rest
 // of the app uses. Drop more files in that folder and list them here.

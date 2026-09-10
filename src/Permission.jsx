@@ -18,6 +18,7 @@
    call carries on underneath this panel. */
 
 import { useState } from "react";
+import { meetingCode, reloadForDevices } from "./ui.js";
 
 const KIND = {
   video: { label: "Camera", lower: "camera" },
@@ -104,23 +105,44 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
 
   const k = KIND[info.kind] || KIND.video;
   const { title, body, action } = copyFor(info.state, k);
+  // A reload is the reliable way back to a prompt, but it is only worth
+  // offering automatically where a prompt is actually still possible. When the
+  // permission is blocked outright, reloading lands in exactly the same place,
+  // so that case gets it as a button the person chooses rather than a fallback
+  // that could bounce them round in circles.
+  const canStillPrompt = info.state === "dismissed" || info.state === "busy";
+
+  async function enable() {
+    if (info.kind === "audio") await client.self.enableAudio();
+    else await client.self.enableVideo();
+  }
 
   async function retry() {
     if (busy) return;
     setBusy(true);
     setFailed(false);
     try {
-      // Acquires the device and publishes it on the meeting that is already
-      // running. Nothing here reconnects, so the call is not interrupted.
-      if (info.kind === "audio") await client.self.enableAudio();
-      else await client.self.enableVideo();
+      // In place first. If the permission is merely unanswered this brings the
+      // prompt straight back, and the call is never interrupted: enableVideo
+      // and enableAudio acquire and publish on the running meeting without
+      // touching the connection.
+      await enable();
       onDismiss();
+      return;
     } catch (e) {
-      setFailed(true);
+      /* fall through */
     } finally {
       setBusy(false);
     }
+
+    // Asking in place did not get there. A reload re-runs the whole media
+    // warm-up, which does, and the rejoin flag means the reloaded page goes
+    // straight back into the meeting rather than stopping at the setup screen.
+    if (canStillPrompt) reloadForDevices(meetingCode());
+    else setFailed(true);
   }
+
+  const reload = () => reloadForDevices(meetingCode());
 
   return (
     <div
@@ -145,6 +167,11 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
           <button className="btn" onClick={retry} disabled={busy}>
             {busy ? "Asking..." : action}
           </button>
+          {!canStillPrompt && (
+            <button className="btn btn-ghost" onClick={reload} disabled={busy}>
+              Reload and ask again
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={onDismiss} disabled={busy}>
             Not now
           </button>
@@ -159,8 +186,9 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
         </div>
 
         <div className="hint" style={{ marginTop: 6 }}>
-          You stay in the meeting either way. This only turns on your own{" "}
-          {k.lower}, and never disconnects the call.
+          {canStillPrompt
+            ? "If the prompt does not appear, the page reloads once and takes you straight back into the meeting."
+            : "Reloading takes you straight back into the meeting — you will not have to press Join again."}
         </div>
       </div>
     </div>

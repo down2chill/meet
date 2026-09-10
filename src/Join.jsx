@@ -3,7 +3,7 @@ import {
   useRealtimeKitClient,
   initRTKMedia,
 } from "@cloudflare/realtimekit-react";
-import { COMPANY, api } from "./ui.js";
+import { COMPANY, api, meetingCode, consumeRejoin, canProduce } from "./ui.js";
 import { Shell, TopBar, Footer, Waiting, LockIcon, ArrowIcon } from "./chrome.jsx";
 
 // The meeting and everything the SDK's UI kit drags in.
@@ -70,8 +70,13 @@ export default function Join() {
   const clientRef = useRef(null);
   const usedWarmMedia = useRef(false);
 
-  const parts = location.pathname.split("/");
-  const code = parts[parts.indexOf("j") + 1] || "";
+  const code = meetingCode();
+
+  // Read once, on the first render. If this load is the reload we asked for to
+  // re-trigger a device prompt, the setup screen is skipped and the SDK joins
+  // the moment it is ready.
+  const skipSetup = useRef(null);
+  if (skipSetup.current === null) skipSetup.current = consumeRejoin(code);
   // Newer host links carry the key in the fragment, which browsers never put
   // in a request or a Referer header. Older ?host= links still work.
   const hostKey =
@@ -186,8 +191,11 @@ export default function Join() {
           } catch (e) {
             /* already gone */
           }
-          await c.self.enableAudio().catch(() => {});
-          await c.self.enableVideo().catch(() => {});
+          // Only what this preset may publish. A guest preset that allows
+          // audio but not video would otherwise end in a publish the server
+          // rejects with "Expecting at least 1 track in the request".
+          if (canProduce(c.self, "audio")) await c.self.enableAudio().catch(() => {});
+          if (canProduce(c.self, "video")) await c.self.enableVideo().catch(() => {});
         });
 
       // Whatever name they settle on in the setup screen is worth keeping, so
@@ -252,7 +260,7 @@ export default function Join() {
   if (client)
     return (
       <Suspense fallback={<Waiting text="Opening the room..." />}>
-        <Meeting client={client} />
+        <Meeting client={client} skipSetup={skipSetup.current} />
       </Suspense>
     );
 
