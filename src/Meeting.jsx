@@ -19,6 +19,8 @@ import {
   classifyClick,
   markRejoin,
   meetingCode,
+  hideAudioDialog,
+  pressAudioDialog,
 } from "./ui.js";
 import PermissionBlocked from "./Permission.jsx";
 
@@ -50,6 +52,7 @@ export default function Meeting({ client, skipSetup }) {
 
   useVideoFit(setConfig);
   useCameraSwitchFix(client, addon);
+  useAudioUnlock(client);
 
   return (
     <div className={joined ? "meeting-root" : "meeting-root setup"}>
@@ -97,6 +100,58 @@ export default function Meeting({ client, skipSetup }) {
       )}
     </div>
   );
+}
+
+/**
+ * Lets the first click anywhere start other people's audio, instead of the
+ * SDK's "allow audio playback" dialog.
+ *
+ * A document nobody has touched is not allowed to start audio. That bites on
+ * the rejoin path, where the meeting joins with no Join click: the SDK's
+ * rtk-participants-audio tests autoplay the moment it mounts, fails, and puts
+ * up a dialog whose one button calls play() and closes. Everything it renders
+ * sits inside its own open shadow root -- itself nested in rtk-meeting's -- so
+ * an outer stylesheet cannot touch it and document.querySelector cannot find
+ * it. deepQuery walks the shadow roots; a <style> appended to that root hides
+ * the dialog; and the person's first pointerdown or keydown presses its button
+ * for them, which is the moment the browser grants activation, so the play()
+ * inside that handler is allowed. If the first interaction comes before the
+ * dialog ever exists, activation is already sticky when the component mounts
+ * and its own play() simply succeeds.
+ *
+ * The component only mounts once the room is joined, hence the roomJoined
+ * hook and the short retry: it appears a render or two after the event.
+ *
+ * Until that first interaction, others are silent. That is the trade the page
+ * makes for joining with no click at all.
+ */
+function useAudioUnlock(client) {
+  useEffect(() => {
+    const timers = [];
+    const hide = () => {
+      // The element arrives a beat after roomJoined; keep looking briefly.
+      let tries = 0;
+      const tick = () => {
+        if (hideAudioDialog() || ++tries > 20) return;
+        timers.push(setTimeout(tick, 250));
+      };
+      tick();
+    };
+    if (client.self.roomJoined) hide();
+    client.self.addListener("roomJoined", hide);
+
+    const unlock = () => {
+      pressAudioDialog();
+    };
+    document.addEventListener("pointerdown", unlock, true);
+    document.addEventListener("keydown", unlock, true);
+    return () => {
+      client.self.removeListener("roomJoined", hide);
+      timers.forEach(clearTimeout);
+      document.removeEventListener("pointerdown", unlock, true);
+      document.removeEventListener("keydown", unlock, true);
+    };
+  }, [client]);
 }
 
 /**

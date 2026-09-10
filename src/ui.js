@@ -139,6 +139,54 @@ export function classifyClick(path, reloadLabel) {
   return { reload: inPermissions && reload, toggle };
 }
 
+// querySelector that descends into every open shadow root. The SDK's UI is
+// nested shadow roots several deep (rtk-meeting > ... > rtk-participants-audio),
+// none of which document.querySelector can see into.
+export function deepQuery(selector, root) {
+  root = root || document;
+  const hit = root.querySelector(selector);
+  if (hit) return hit;
+  const all = root.querySelectorAll("*");
+  for (const el of all) {
+    if (el.shadowRoot) {
+      const found = deepQuery(selector, el.shadowRoot);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// The SDK's "allow audio playback" dialog lives inside rtk-participants-audio's
+// open shadow root, with its one button as a light child of the rtk-dialog it
+// renders. Outer stylesheets cannot reach in there, but a <style> appended to
+// the root can. Stencil patches only the nodes it rendered itself, so a foreign
+// style node survives its re-renders.
+const AUDIO_HIDE_ID = "meet-hide-audio-dialog";
+
+export function hideAudioDialog() {
+  const host = deepQuery("rtk-participants-audio");
+  const root = host && host.shadowRoot;
+  if (!root) return false;
+  if (!root.getElementById(AUDIO_HIDE_ID)) {
+    const style = document.createElement("style");
+    style.id = AUDIO_HIDE_ID;
+    style.textContent = "rtk-dialog{display:none !important}";
+    root.appendChild(style);
+  }
+  return true;
+}
+
+// Presses that dialog's button, whose handler is the play() call the browser
+// will only honour from inside a user gesture. Returns whether there was one.
+export function pressAudioDialog() {
+  const host = deepQuery("rtk-participants-audio");
+  const root = host && host.shadowRoot;
+  const btn = root && root.querySelector("rtk-dialog rtk-button");
+  if (!btn) return false;
+  btn.click();
+  return true;
+}
+
 // Presets decide what a participant may publish, and a guest preset commonly
 // allows audio but not video. Asking the SDK to enable something the preset
 // forbids ends in a publish the server rejects, so check first. Deliberately
