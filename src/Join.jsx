@@ -81,6 +81,14 @@ export default function Join() {
   const [busy, setBusy] = useState(true);
 
   const [slow, setSlow] = useState(false);
+  // On the rejoin path the meeting joins without the setup screen's Join click,
+  // and a document nobody has touched is not allowed to start audio: the SDK
+  // then puts up its own "allow audio playback" dialog, whose button plays an
+  // empty stream and so appears to do nothing. One tap anywhere before the
+  // meeting mounts is all the browser needs -- activation is sticky for the
+  // document -- so the rejoin waits for that tap, and takes it early: tapping
+  // during the connect counts.
+  const [tapped, setTapped] = useState(false);
 
   const media = useRef(null);
   const probe = useRef(null);
@@ -156,8 +164,25 @@ export default function Join() {
     // After this long, say so, so a slow join does not read as a broken one.
     const slowTimer = setTimeout(() => setSlow(true), 6000);
 
+    let untap = () => {};
+    if (skipSetup.current) {
+      const onTap = () => {
+        setTapped(true);
+        untap();
+      };
+      document.addEventListener("pointerdown", onTap, true);
+      document.addEventListener("keydown", onTap, true);
+      untap = () => {
+        document.removeEventListener("pointerdown", onTap, true);
+        document.removeEventListener("keydown", onTap, true);
+      };
+    }
+
     start("", ui, t0);
-    return () => clearTimeout(slowTimer);
+    return () => {
+      clearTimeout(slowTimer);
+      untap();
+    };
   }, []);
 
   async function start(password, uiPromise, t0) {
@@ -304,6 +329,28 @@ export default function Join() {
     return c;
   }
 
+  if (client && skipSetup.current && !tapped)
+    return (
+      <Shell center bar={<TopBar />}>
+        <div className="narrow rejoin-gate">
+          <div className="card" style={{ textAlign: "center" }}>
+            <div className="eyebrow" style={{ marginBottom: 8 }}>
+              {COMPANY} Meet
+            </div>
+            <div className="card-title" style={{ fontSize: 22, marginBottom: 8 }}>
+              Ready to rejoin
+            </div>
+            <div className="muted" style={{ marginBottom: 18 }}>
+              Tap anywhere to go straight back in.
+            </div>
+            <button className="btn" onClick={() => setTapped(true)}>
+              Rejoin <ArrowIcon />
+            </button>
+          </div>
+        </div>
+      </Shell>
+    );
+
   if (client)
     return (
       <Suspense fallback={<Waiting text="Opening the room..." />}>
@@ -386,7 +433,11 @@ export default function Join() {
               <div className="eyebrow" style={{ marginBottom: 8 }}>
                 {COMPANY} Meet
               </div>
-              <div className="muted">Connecting you to the room...</div>
+              <div className="muted">
+                {skipSetup.current
+                  ? "Reconnecting — tap anywhere and you go straight back in."
+                  : "Connecting you to the room..."}
+              </div>
               {slow && (
                 <div className="hint" style={{ marginTop: 10 }}>
                   Still going. The first connection from a browser is the slow

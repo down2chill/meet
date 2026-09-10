@@ -15,8 +15,6 @@ import {
   saveBackground,
   loadBackground,
   backgroundEffectsSupported,
-  markRejoin,
-  meetingCode,
 } from "./ui.js";
 import PermissionBlocked from "./Permission.jsx";
 
@@ -48,7 +46,6 @@ export default function Meeting({ client, skipSetup }) {
 
   useVideoFit(setConfig);
   useCameraSwitchFix(client, addon);
-  useRejoinOnReload(client);
 
   return (
     <div className={joined ? "meeting-root" : "meeting-root setup"}>
@@ -236,25 +233,6 @@ function useBlockedMedia(client) {
   };
 }
 
-/**
- * Any reload from inside a live meeting should land back in the meeting rather
- * than on the setup screen — including reloads we did not initiate, such as the
- * SDK's own reload button in its device-error UI, which is a plain
- * location.reload() we get no say in.
- *
- * Leaving the meeting properly clears roomJoined first, so quitting still gets
- * the setup screen next time, and the flag is read once and expires in a
- * minute, so it cannot leak into an unrelated visit.
- */
-function useRejoinOnReload(client) {
-  useEffect(() => {
-    const onHide = () => {
-      if (client.self.roomJoined) markRejoin(meetingCode());
-    };
-    window.addEventListener("pagehide", onHide);
-    return () => window.removeEventListener("pagehide", onHide);
-  }, [client]);
-}
 
 /**
  * Adds the blur / virtual background control to the control bar, for everyone
