@@ -15,6 +15,8 @@ import {
   saveBackground,
   loadBackground,
   backgroundEffectsSupported,
+  markRejoin,
+  meetingCode,
 } from "./ui.js";
 import PermissionBlocked from "./Permission.jsx";
 
@@ -41,11 +43,12 @@ const baseConfig = brandedConfig();
 export default function Meeting({ client, skipSetup }) {
   const addon = useRef(null);
   const [config, setConfig] = useVideoBackground(client, addon);
-  const [blocked, dismissBlocked] = useBlockedMedia(client);
+  const device = useBlockedMedia(client);
   const joined = useJoined(client);
 
   useVideoFit(setConfig);
   useCameraSwitchFix(client, addon);
+  useRejoinOnReload(client);
 
   return (
     <div className={joined ? "meeting-root" : "meeting-root setup"}>
@@ -74,11 +77,21 @@ export default function Meeting({ client, skipSetup }) {
         />
       </RealtimeKitProvider>
 
-      {blocked && (
+      {/* Dismissing the panel must not mean the problem disappears. This stays
+          until the device actually works, and puts the panel back. */}
+      {device.blocked && !device.panelOpen && (
+        <button className="device-alert" onClick={device.open}>
+          <span className="device-alert-dot" />
+          {device.blocked.kind === "audio" ? "Microphone" : "Camera"} unavailable
+          <span className="device-alert-cta">Fix</span>
+        </button>
+      )}
+
+      {device.blocked && device.panelOpen && (
         <PermissionBlocked
-          info={blocked}
+          info={device.blocked}
           client={client}
-          onDismiss={dismissBlocked}
+          onDismiss={device.close}
         />
       )}
     </div>
@@ -169,23 +182,29 @@ const MEDIA_STATE = {
 };
 
 function useBlockedMedia(client) {
-  const [blocked, setBlockedState] = useState(null);
-  // Once someone has waved this away for a device, it does not come back on its
-  // own. These events can repeat on every failed attempt, and a panel that
-  // reopens itself over a running meeting is worse than no panel at all.
-  const waved = useRef({});
+  const [blocked, setBlocked] = useState(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  // The panel opens by itself once per device. These events repeat on every
+  // failed attempt, and a panel that keeps reappearing over a running call is
+  // worse than no panel; after the first time the alert is the way back in.
+  const announced = useRef({});
 
   useEffect(() => {
     const onPermission = ({ message, kind }) => {
       if (kind === "screenshare") return; // its own flow, never silently denied
       if (message === "ACCEPTED") {
-        waved.current[kind] = false;
-        setBlockedState((b) => (b && b.kind === kind ? null : b));
+        announced.current[kind] = false;
+        setBlocked((b) => (b && b.kind === kind ? null : b));
+        setPanelOpen(false);
         return;
       }
       const state = MEDIA_STATE[message];
-      if (!state || waved.current[kind]) return;
-      setBlockedState((b) => (b ? b : { state, kind }));
+      if (!state) return;
+      setBlocked({ state, kind });
+      if (!announced.current[kind]) {
+        announced.current[kind] = true;
+        setPanelOpen(true);
+      }
     };
 
     client.self.addListener("mediaPermissionUpdate", onPermission);
@@ -196,14 +215,32 @@ function useBlockedMedia(client) {
     };
   }, [client]);
 
-  const dismiss = () => {
-    setBlockedState((b) => {
-      if (b) waved.current[b.kind] = true;
-      return null;
-    });
+  return {
+    blocked,
+    panelOpen,
+    open: () => setPanelOpen(true),
+    close: () => setPanelOpen(false),
   };
+}
 
-  return [blocked, dismiss];
+/**
+ * Any reload from inside a live meeting should land back in the meeting rather
+ * than on the setup screen — including reloads we did not initiate, such as the
+ * SDK's own reload button in its device-error UI, which is a plain
+ * location.reload() we get no say in.
+ *
+ * Leaving the meeting properly clears roomJoined first, so quitting still gets
+ * the setup screen next time, and the flag is read once and expires in a
+ * minute, so it cannot leak into an unrelated visit.
+ */
+function useRejoinOnReload(client) {
+  useEffect(() => {
+    const onHide = () => {
+      if (client.self.roomJoined) markRejoin(meetingCode());
+    };
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
+  }, [client]);
 }
 
 /**

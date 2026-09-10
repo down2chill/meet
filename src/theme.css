@@ -236,6 +236,33 @@ h1, h2, h3, p { margin: 0; }
 }
 .perm-card { max-height: 100%; overflow-y: auto; }
 
+/* Stays on screen after the panel is dismissed, so a blocked device is never
+   just silently missing. Sits under the overlay but over the meeting UI. */
+.device-alert {
+  position: fixed; z-index: 1500;
+  top: calc(12px + env(safe-area-inset-top)); left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 9px;
+  max-width: calc(100% - 24px);
+  border-radius: 999px; border: 1px solid rgba(255, 173, 207, .45);
+  background: rgba(7, 25, 58, .92);
+  padding: 9px 9px 9px 15px;
+  font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: .09em;
+  text-transform: uppercase; white-space: nowrap;
+  color: #fff;
+  box-shadow: 0 14px 34px rgba(4, 12, 30, .45);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  transition: border-color .2s ease, background .2s ease;
+}
+.device-alert:hover { border-color: rgba(255, 173, 207, .8); background: rgba(9, 30, 68, .96); }
+.device-alert-dot { height: 7px; width: 7px; flex-shrink: 0; border-radius: 999px; background: var(--danger); }
+.device-alert-cta {
+  border-radius: 999px; background: var(--accent);
+  padding: 5px 12px; color: var(--accent-ink); font-weight: 700; letter-spacing: .1em;
+}
+@media (max-width: 420px) { .device-alert { font-size: 9px; padding-left: 12px; } }
+
 /* the SDK paints the whole viewport; nothing of ours shows behind it */
 .meeting-root { position: fixed; inset: 0; background: #050f24; }
 

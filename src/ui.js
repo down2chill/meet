@@ -89,6 +89,29 @@ export function reloadForDevices(code) {
   location.reload();
 }
 
+// Ask the browser directly what the permission actually is, rather than
+// inferring it from whichever event the SDK happened to fire.
+//
+// Returns "granted" | "prompt" | "denied", or null where the browser will not
+// say -- Firefox does not support camera/microphone in permissions.query and
+// throws, so that path has to fall back to the SDK's own reading.
+//
+// "denied" is the one that matters: it is the end of the road for the page.
+// getUserMedia will reject without ever showing a prompt, and there is no API
+// that undoes it. permissions.revoke() was removed from browsers years ago,
+// clearing site storage does not touch permissions, and reloading re-runs the
+// same rejection. Only the person can change it, in browser settings.
+export async function probePermission(kind) {
+  try {
+    if (!navigator.permissions || !navigator.permissions.query) return null;
+    const name = kind === "audio" ? "microphone" : "camera";
+    const status = await navigator.permissions.query({ name });
+    return status && status.state ? status.state : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Presets decide what a participant may publish, and a guest preset commonly
 // allows audio but not video. Asking the SDK to enable something the preset
 // forbids ends in a publish the server rejects, so check first. Deliberately

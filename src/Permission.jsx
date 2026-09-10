@@ -1,24 +1,24 @@
 /* What to show when the camera or microphone did not start.
 
-   The distinction that decides everything here is dismissed vs blocked.
+   The whole design turns on one fact that is easy to wish away: once a browser
+   has been told to block a device, THE PAGE CANNOT BRING THE PROMPT BACK.
+   getUserMedia rejects immediately without prompting; permissions.revoke() was
+   removed from browsers years ago; clearing localStorage, cookies or the whole
+   origin's storage does not touch permissions, because they live in the browser
+   profile and not in site storage; and reloading simply re-runs the same
+   rejection. There is no button, here or anywhere, that undoes it. Only the
+   person can, in their browser's own settings.
 
-   A *dismissed* prompt (closed, swiped away, ignored) leaves the permission at
-   "ask". Asking again really does bring the prompt straight back, no reload
-   involved -- so that case is simply a button.
+   So this panel does not offer a reload for that case. Offering one implies it
+   might work, and watching it not work is worse than being told plainly.
 
-   A *blocked* one does not. permissions.revoke() was removed from the platform
-   years ago, and clearing localStorage, cookies or the whole origin's storage
-   does not touch permissions: browsers keep those in the profile, not in site
-   storage. So wiping page data would change nothing, and neither does the
-   reload the SDK suggests -- a browser told to block stops asking, full stop.
-   Only the person can undo it, in their own browser's settings.
+   The recoverable case is different: a prompt that was closed or swiped away
+   leaves the permission at "prompt", and asking again really does bring it
+   back. Telling the two apart matters, so we ask the browser directly via
+   permissions.query rather than trusting whichever event the SDK fired. */
 
-   Either way the retry runs against the live meeting. enableVideo/enableAudio
-   acquire the device and publish it; they do not touch the connection, so the
-   call carries on underneath this panel. */
-
-import { useState } from "react";
-import { meetingCode, reloadForDevices } from "./ui.js";
+import { useEffect, useState } from "react";
+import { meetingCode, reloadForDevices, probePermission } from "./ui.js";
 
 const KIND = {
   video: { label: "Camera", lower: "camera" },
@@ -27,27 +27,39 @@ const KIND = {
 
 // Rough, and deliberately so: this only picks which sentence to show, and the
 // fallback sentence is true everywhere.
-function whereToLook() {
+function whereToLook(lower) {
   const ua = navigator.userAgent;
   const android = /Android/i.test(ua);
 
   if (/Firefox|FxiOS/i.test(ua))
     return android
-      ? "Tap the padlock to the left of the address bar, open the site's permissions and clear the blocked entry, then set it to Allow."
-      : "Click the padlock to the left of the address bar. Blocked permissions are listed there with an x beside them; clear it, then choose Allow.";
+      ? "Tap the padlock to the left of the address bar, open this site's permissions, clear the blocked " +
+          lower +
+          " entry, then reload."
+      : "Click the padlock to the left of the address bar. The blocked " +
+          lower +
+          " is listed there with an x beside it — clear it, then reload.";
 
   if (/Edg\//i.test(ua))
-    return "Click the padlock (or the camera icon) at the left of the address bar, open Permissions for this site and switch it to Allow.";
+    return (
+      "Click the padlock at the left of the address bar, open Permissions for this site, and switch the " +
+      lower +
+      " to Allow."
+    );
 
   if (/Chrome|CriOS/i.test(ua))
     return android
-      ? "Tap the padlock to the left of the address bar, choose Permissions, and switch it to Allow."
-      : "Click the camera icon at the right of the address bar, or the padlock at the left, and switch it to Allow.";
+      ? "Tap the padlock to the left of the address bar, choose Permissions, and switch the " +
+          lower +
+          " to Allow."
+      : "Click the padlock at the left of the address bar and switch the " +
+          lower +
+          " to Allow. If it is not listed there, open Site settings from the same menu.";
 
   if (/Safari/i.test(ua))
-    return "Open Safari > Settings for This Website (or right-click the address bar) and set it to Allow.";
+    return "Open Safari > Settings for This Website, and set the " + lower + " to Allow.";
 
-  return "Open your browser's site settings for this page and switch it to Allow.";
+  return "Open your browser's site settings for this page and switch the " + lower + " to Allow.";
 }
 
 function systemHint() {
@@ -59,58 +71,32 @@ function systemHint() {
   return "Give your browser access in your device's privacy settings, then come back and press Try again.";
 }
 
-function copyFor(state, k) {
-  switch (state) {
-    case "dismissed":
-      return {
-        title: "The " + k.lower + " prompt was closed",
-        body:
-          "Nothing is blocked — your browser is still willing to ask. Press the button below and the prompt comes straight back.",
-        action: "Ask again",
-      };
-    case "system":
-      return {
-        title: "Your device is blocking the " + k.lower,
-        body: systemHint(),
-        action: "Try again",
-      };
-    case "busy":
-      return {
-        title: "The " + k.lower + " is already in use",
-        body:
-          "Another app or browser tab has hold of it. Close whatever else is using it, then try again.",
-        action: "Try again",
-      };
-    case "missing":
-      return {
-        title: "No " + k.lower + " found",
-        body:
-          "Nothing is connected that we can use. Plug something in, then try again.",
-        action: "Try again",
-      };
-    default: // "browser"
-      return {
-        title: "This browser is blocking the " + k.lower,
-        body:
-          "Once a browser has been told to block, it stops asking, and reloading will not bring the prompt back. " +
-          whereToLook(),
-        action: "Try again",
-      };
-  }
-}
-
 export default function PermissionBlocked({ info, client, onDismiss }) {
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // null until the browser answers: "granted" / "prompt" / "denied", or stays
+  // null on browsers that will not say.
+  const [real, setReal] = useState(null);
 
   const k = KIND[info.kind] || KIND.video;
-  const { title, body, action } = copyFor(info.state, k);
-  // A reload is the reliable way back to a prompt, but it is only worth
-  // offering automatically where a prompt is actually still possible. When the
-  // permission is blocked outright, reloading lands in exactly the same place,
-  // so that case gets it as a button the person chooses rather than a fallback
-  // that could bounce them round in circles.
-  const canStillPrompt = info.state === "dismissed" || info.state === "busy";
+
+  useEffect(() => {
+    let live = true;
+    probePermission(info.kind).then((state) => {
+      if (live) setReal(state);
+    });
+    return () => {
+      live = false;
+    };
+  }, [info.kind]);
+
+  // The browser's own answer wins wherever we can get it; the SDK's reading is
+  // only the fallback for browsers that will not say.
+  const hardBlocked =
+    real === "denied" || (real === null && info.state === "browser");
+  const system = info.state === "system";
+  const canPrompt =
+    real === "prompt" || (real === null && info.state === "dismissed");
 
   async function enable() {
     if (info.kind === "audio") await client.self.enableAudio();
@@ -122,10 +108,9 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
     setBusy(true);
     setFailed(false);
     try {
-      // In place first. If the permission is merely unanswered this brings the
-      // prompt straight back, and the call is never interrupted: enableVideo
-      // and enableAudio acquire and publish on the running meeting without
-      // touching the connection.
+      // Works the moment the setting is changed, and never interrupts the
+      // call: enableVideo/enableAudio acquire and publish on the running
+      // meeting without touching the connection.
       await enable();
       onDismiss();
       return;
@@ -135,14 +120,32 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
       setBusy(false);
     }
 
-    // Asking in place did not get there. A reload re-runs the whole media
-    // warm-up, which does, and the rejoin flag means the reloaded page goes
-    // straight back into the meeting rather than stopping at the setup screen.
-    if (canStillPrompt) reloadForDevices(meetingCode());
+    // Only worth reloading where a prompt is genuinely still available. When a
+    // device is blocked, a reload lands in exactly the same place.
+    if (canPrompt) reloadForDevices(meetingCode());
     else setFailed(true);
   }
 
-  const reload = () => reloadForDevices(meetingCode());
+  let title;
+  let body;
+  if (system) {
+    title = "Your device is blocking the " + k.lower;
+    body = systemHint();
+  } else if (hardBlocked) {
+    title = k.label + " is blocked for this site";
+    body =
+      "This one is not ours to fix. Once a browser has been told to block a device it stops asking, and no button on this page can bring the prompt back — not a reload, and not clearing site data. " +
+      whereToLook(k.lower) +
+      " Then press Try again.";
+  } else if (canPrompt) {
+    title = "The " + k.lower + " prompt was closed";
+    body =
+      "Nothing is blocked — your browser is still willing to ask. Press the button below and the prompt comes straight back.";
+  } else {
+    title = "The " + k.lower + " did not start";
+    body =
+      "Another app or browser tab may have hold of it. Close whatever else is using it, then try again.";
+  }
 
   return (
     <div
@@ -165,13 +168,8 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
 
         <div className="stack">
           <button className="btn" onClick={retry} disabled={busy}>
-            {busy ? "Asking..." : action}
+            {busy ? "Asking..." : canPrompt ? "Ask again" : "Try again"}
           </button>
-          {!canStillPrompt && (
-            <button className="btn btn-ghost" onClick={reload} disabled={busy}>
-              Reload and ask again
-            </button>
-          )}
           <button className="btn btn-ghost" onClick={onDismiss} disabled={busy}>
             Not now
           </button>
@@ -179,16 +177,18 @@ export default function PermissionBlocked({ info, client, onDismiss }) {
 
         <div className="err" style={{ marginTop: 14 }}>
           {failed
-            ? info.state === "dismissed"
-              ? "Still nothing. It may have been blocked rather than dismissed."
-              : "Still no luck. The setting may not have saved yet."
+            ? hardBlocked
+              ? "Still blocked. The setting has to be changed in the browser first — nothing here can do it."
+              : "Still no luck."
             : ""}
         </div>
 
         <div className="hint" style={{ marginTop: 6 }}>
-          {canStillPrompt
-            ? "If the prompt does not appear, the page reloads once and takes you straight back into the meeting."
-            : "Reloading takes you straight back into the meeting — you will not have to press Join again."}
+          {hardBlocked
+            ? "Changing it does not interrupt the call, and if a reload is needed you land straight back in the meeting."
+            : "You stay in the meeting either way — this only turns on your own " +
+              k.lower +
+              "."}
         </div>
       </div>
     </div>
