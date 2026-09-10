@@ -8,3 +8,7 @@
 # Hashed filenames are immutable, so let browsers keep them.
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+# Brand assets (fonts, logo, icons) change about never.
+/brand/*
+  Cache-Control: public, max-age=604800

@@ -1,29 +1,13 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   useRealtimeKitClient,
-  RealtimeKitProvider,
   initRTKMedia,
 } from "@cloudflare/realtimekit-react";
-import {
-  COMPANY,
-  api,
-  centred,
-  card,
-  narrow,
-  brandStyle,
-  input,
-  button,
-  errStyle,
-  muted,
-  label,
-  stack,
-} from "./ui.js";
+import { COMPANY, api } from "./ui.js";
+import { Shell, TopBar, Footer, Waiting, LockIcon, ArrowIcon } from "./chrome.jsx";
 
-const RtkMeeting = lazy(() =>
-  import("@cloudflare/realtimekit-react-ui").then((m) => ({
-    default: m.RtkMeeting,
-  }))
-);
+// The meeting and everything the SDK's UI kit drags in.
+const Meeting = lazy(() => import("./Meeting.jsx"));
 
 // How long to let the camera and microphone warm up before giving up on them
 // and connecting anyway.
@@ -99,7 +83,7 @@ export default function Join() {
     const t0 = performance.now();
 
     // The meeting UI is the largest chunk on the page. Start it immediately.
-    const ui = import("@cloudflare/realtimekit-react-ui");
+    const ui = import("./Meeting.jsx");
 
     // Fired now so the permission prompt appears while the token request is in
     // flight. Nothing ever blocks on this promise; it resolves to a media
@@ -233,64 +217,94 @@ export default function Join() {
     return c;
   }
 
-  if (client) {
+  if (client)
     return (
-      <RealtimeKitProvider value={client}>
-        <Suspense fallback={<div style={centred}>Loading meeting...</div>}>
-          <RtkMeeting
-            meeting={client}
-            // The setup screen is the entry room: name, camera preview and
-            // device pickers, and the natural place for a permission prompt.
-            showSetupScreen
-            style={{ height: "100vh", width: "100vw" }}
-          />
-        </Suspense>
-      </RealtimeKitProvider>
+      <Suspense fallback={<Waiting text="Opening the room..." />}>
+        <Meeting client={client} />
+      </Suspense>
     );
-  }
 
-  if (needsPw) {
+  if (needsPw)
     return (
-      <div style={centred}>
-        <div style={{ ...card, ...narrow }}>
-          <div style={brandStyle}>{COMPANY}</div>
-          <form
-            style={stack}
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!busy) start(pw);
-            }}
-          >
-            <label style={label} htmlFor="pw">
+      <Shell center bar={<TopBar />}>
+        <div className="narrow">
+          <div className="card">
+            <div className="eyebrow" style={{ marginBottom: 6 }}>
+              <LockIcon style={{ verticalAlign: "-1px", marginRight: 6 }} />
+              Locked room
+            </div>
+            <div className="card-title" style={{ fontSize: 22, marginBottom: 6 }}>
               This meeting has a password
-            </label>
-            <input
-              id="pw"
-              style={input}
-              type="password"
-              placeholder="Meeting password"
-              autoComplete="off"
-              autoFocus
-              value={pw}
-              onChange={(e) => setPw(e.target.value)}
-            />
-            <button style={button} type="submit" disabled={busy}>
-              {busy ? "Checking..." : "Continue"}
-            </button>
-          </form>
-          <div style={{ ...errStyle, marginTop: 12 }}>{err}</div>
-        </div>
-      </div>
-    );
-  }
+            </div>
+            <p className="muted" style={{ marginBottom: 18 }}>
+              Ask the host for it if you do not have one.
+            </p>
 
+            <form
+              className="stack"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!busy) start(pw);
+              }}
+            >
+              <label className="field-label" htmlFor="pw">
+                Meeting password
+              </label>
+              <input
+                id="pw"
+                className="field"
+                type="password"
+                placeholder="Meeting password"
+                autoComplete="off"
+                autoFocus
+                value={pw}
+                onChange={(e) => setPw(e.target.value)}
+              />
+              <button className="btn" type="submit" disabled={busy}>
+                {busy ? "Checking..." : "Continue"}
+                {busy ? null : <ArrowIcon />}
+              </button>
+            </form>
+
+            <div className="err" style={{ marginTop: 14 }}>
+              {err}
+            </div>
+          </div>
+          <Footer />
+        </div>
+      </Shell>
+    );
+
+  // Connecting, or connecting went wrong. Same card either way.
   return (
-    <div style={centred}>
-      <div style={{ ...card, ...narrow, textAlign: "center" }}>
-        <div style={brandStyle}>{COMPANY}</div>
-        <div style={muted}>{err ? "" : "Connecting..."}</div>
-        <div style={{ ...errStyle, marginTop: 8 }}>{err}</div>
+    <Shell center bar={<TopBar />}>
+      <div className="narrow">
+        <div className="card" style={{ textAlign: "center" }}>
+          {err ? (
+            <>
+              <div className="eyebrow" style={{ marginBottom: 8 }}>
+                {COMPANY} Meet
+              </div>
+              <div className="card-title" style={{ fontSize: 20, marginBottom: 10 }}>
+                We could not open that room
+              </div>
+              <div className="err">{err}</div>
+              <a className="btn btn-ghost" href="/" style={{ marginTop: 20 }}>
+                Try another code
+              </a>
+            </>
+          ) : (
+            <>
+              <div className="spinner" />
+              <div className="eyebrow" style={{ marginBottom: 8 }}>
+                {COMPANY} Meet
+              </div>
+              <div className="muted">Connecting you to the room...</div>
+            </>
+          )}
+        </div>
+        <Footer />
       </div>
-    </div>
+    </Shell>
   );
 }

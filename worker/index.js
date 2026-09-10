@@ -65,15 +65,24 @@ const SECURITY_HEADERS = {
 // CSP has to be tested against a real meeting before it is enforced. Set
 // CSP = CSP_POLICY once you have done that, then confirm screenshare and
 // background blur still work.
+//
+// Background blur and virtual backgrounds are the awkward part: the addon
+// fetches its TensorFlow Lite runtime and segmentation model at runtime from
+// hosts Dyte still owns, not from us and not from Cloudflare. Those two hosts
+// are listed below for that reason alone -- drop them and the background
+// button stops working the moment this policy is switched on.
+const BG_EFFECT_HOSTS =
+  "https://assets.dyte.io https://dyte-plugins.s3.ap-south-1.amazonaws.com";
 const CSP_POLICY = [
   "default-src 'self'",
-  "script-src 'self' 'wasm-unsafe-eval'",
+  "script-src 'self' 'wasm-unsafe-eval' " + BG_EFFECT_HOSTS,
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  "img-src 'self' data: blob: " + BG_EFFECT_HOSTS,
   "font-src 'self' data:",
   "media-src 'self' blob: mediastream:",
   "worker-src 'self' blob:",
-  "connect-src 'self' https://*.cloudflare.com wss://*.cloudflare.com blob:",
+  "connect-src 'self' https://*.cloudflare.com wss://*.cloudflare.com blob: " +
+    BG_EFFECT_HOSTS,
   "frame-ancestors 'self'",
   "base-uri 'self'",
   "form-action 'self'",

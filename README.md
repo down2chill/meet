@@ -16,7 +16,9 @@ Self-hosted video meetings on Cloudflare RealtimeKit.
    preset names exactly (case sensitive). Check them under
    Realtime -> RealtimeKit -> Presets.
 
-3. **`src/ui.js`** — set `COMPANY` and `BRAND` to your own values.
+3. **`src/ui.js`** — set `COMPANY` and `SITE`, and `MEETING_TOKENS` if you
+   want the in-call UI in different colours. The rest of the look lives in
+   `src/theme.css`, and the logo, icons and fonts in `public/brand/`.
 
 ## Deploying
 
@@ -103,6 +105,51 @@ integrity-hash mismatch, because the blocked file hashes as empty).
 Nothing in this repo loads it, so it cannot be removed from the code. Turn it
 off in the dashboard: Web Analytics -> your site -> Manage site -> disable
 automatic setup. Or leave it: the errors are cosmetic and the site works.
+
+## Background blur and virtual backgrounds
+
+Everyone in a call — host and guest alike — gets a **Background** button in the
+control bar: blur, one of four Down2Chill backgrounds, or none. The addon is not
+preset-aware, so there is nothing to configure per preset.
+
+- The choice is remembered per device in `localStorage` under `meet:bg`, and
+  re-applied on the next join as soon as the camera is on. Turning the effect
+  off is remembered too.
+- The backgrounds are ours, in `public/brand/backgrounds/`. Add a file there,
+  list it in `BACKGROUNDS` in `src/ui.js`, and it shows up in the picker.
+- `blurStrength` and the mode list are the other two knobs, in `src/Meeting.jsx`.
+
+Two things to know before relying on it:
+
+**It does not work on iOS, at all.** The SDK's own support check rules out
+iPhone and iPad (and Safari before 17) because the segmentation pipeline needs
+a WebGL context it cannot get there. `backgroundEffectsSupported()` in
+`src/ui.js` mirrors that check so those visitors see no button rather than one
+that fails. It is a copy of the SDK's rule, so re-read it when the SDK is
+upgraded.
+
+**It fetches its model from hosts we do not own.** The TensorFlow Lite runtime
+comes from `assets.dyte.io` and the segmentation model from a
+`dyte-plugins` S3 bucket, at the moment someone first applies an effect — not
+from us, and not from Cloudflare. If those hosts are unreachable the effect
+fails and the rest of the call carries on. They are also why `CSP_POLICY` in
+`worker/index.js` lists them; drop them from it and the button stops working
+the day that policy is switched on.
+
+The 85 kB addon chunk is fetched only after the meeting is on screen, so it
+never delays a join.
+
+## Brand assets
+
+Everything under `public/brand/` is copied from the down2chill.com site: the
+wordmark, the couch mark, the icons and the three font faces. `public/favicon.ico`
+is generated from `favicon-512.png` — browsers and link unfurlers ask for that
+exact path whether or not it is linked.
+
+Shared meeting links preview with the `og:` tags in `index.html`. They are
+deliberately static: every route serves the same shell, so no meeting code ever
+reaches a link preview or a crawler cache. To change the share card, replace
+`public/brand/social-1200.jpg` with another 1200x630 image; no code changes.
 
 ## Verifying
 
@@ -225,7 +272,10 @@ setting `CSP = CSP_POLICY`.
 
 ## Pinning versions
 
-The three `@cloudflare/*` packages are pinned to 2.0.2. Bump them deliberately
-and re-test a real call; the SDK options this app relies on (`modules.tracing`,
-`initRTKMedia`, `defaults.mediaHandler`, and the setup screen's own name field)
-are not covered by semver promises.
+The three core `@cloudflare/*` packages are pinned to 2.0.2, and
+`@cloudflare/realtimekit-ui-addons` to 0.1.0. Bump them deliberately and re-test
+a real call; the SDK options this app relies on (`modules.tracing`,
+`initRTKMedia`, `defaults.mediaHandler`, `applyDesignSystem`, and the setup
+screen's own name field) are not covered by semver promises. The addon is
+pre-1.0 and pulls `@cloudflare/realtimekit-virtual-background` in itself, which
+is why that one is not listed here directly.
