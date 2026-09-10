@@ -159,16 +159,35 @@ export default function Join() {
       if (uiPromise) await uiPromise;
       clientRef.current = c;
 
-      // Connected without devices because a prompt was still open. If the
-      // visitor allows it after all, switch them on rather than making them
-      // hunt for the buttons. Attached after the client exists, and fires
-      // straight away if the promise has already settled.
+      // Connected without devices because the warm-up had not finished in time.
+      // It finishes eventually, and when it does we switch the devices on
+      // rather than making the visitor hunt for the buttons.
+      //
+      // The release below is the important part. That warm handler is holding
+      // the camera and microphone open, and we never handed it to the SDK, so
+      // asking the SDK to enable them means a second getUserMedia for hardware
+      // that is already captured. Firefox on Android allows exactly one capture
+      // of a device at a time: the second one fails, and the SDK reports that
+      // failure the same way it reports a refused permission. The result is a
+      // meeting insisting the camera is blocked while the browser is perfectly
+      // happy to give it, and a reload changes nothing because the same race
+      // runs again. So: let go first, then let the SDK take them.
       if (!usedWarmMedia.current)
-        media.current.then((h) => {
+        media.current.then(async (h) => {
           if (!h) return;
-          log("permission arrived late, enabling devices");
-          c.self.enableAudio().catch(() => {});
-          c.self.enableVideo().catch(() => {});
+          log("warm media arrived late, releasing it before the SDK takes over");
+          try {
+            await h.disableVideo();
+          } catch (e) {
+            /* already gone */
+          }
+          try {
+            await h.disableAudio();
+          } catch (e) {
+            /* already gone */
+          }
+          await c.self.enableAudio().catch(() => {});
+          await c.self.enableVideo().catch(() => {});
         });
 
       // Whatever name they settle on in the setup screen is worth keeping, so

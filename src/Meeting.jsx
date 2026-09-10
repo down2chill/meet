@@ -41,7 +41,7 @@ const baseConfig = brandedConfig();
 export default function Meeting({ client }) {
   const addon = useRef(null);
   const [config, setConfig] = useVideoBackground(client, addon);
-  const [blocked, setBlocked] = useBlockedMedia(client);
+  const [blocked, dismissBlocked] = useBlockedMedia(client);
   const joined = useJoined(client);
 
   useVideoFit(setConfig);
@@ -61,7 +61,9 @@ export default function Meeting({ client }) {
           // device pickers, and the natural place for a permission prompt.
           showSetupScreen
           mode="fill"
-          style={{ height: "100%", width: "100%" }}
+          // Sizing lives in theme.css, not here: an inline style outranks every
+          // stylesheet rule, and the short-landscape case below has to be able
+          // to override the height.
         />
       </RealtimeKitProvider>
 
@@ -69,7 +71,7 @@ export default function Meeting({ client }) {
         <PermissionBlocked
           info={blocked}
           client={client}
-          onDismiss={() => setBlocked(null)}
+          onDismiss={dismissBlocked}
         />
       )}
     </div>
@@ -147,23 +149,36 @@ function useCameraSwitchFix(client, addonRef) {
 // that matters most is CANCELED vs DENIED: a dismissed prompt leaves the
 // permission at "ask", so requesting again really does bring the prompt back,
 // while a blocked one does not and no amount of asking (or reloading) will.
+//
+// Only states a person can actually act on are listed. COULD_NOT_START in
+// particular is deliberately absent: a device that is merely busy resolves
+// itself, the SDK already says so in its own UI, and putting a panel over the
+// meeting for it turns one unlucky moment into something that keeps coming
+// back. Anything not named here is left to the SDK.
 const MEDIA_STATE = {
   CANCELED: "dismissed",
   DENIED: "browser",
   SYSTEM_DENIED: "system",
-  COULD_NOT_START: "busy",
-  NO_DEVICES_AVAILABLE: "missing",
 };
 
 function useBlockedMedia(client) {
-  const [blocked, setBlocked] = useState(null);
+  const [blocked, setBlockedState] = useState(null);
+  // Once someone has waved this away for a device, it does not come back on its
+  // own. These events can repeat on every failed attempt, and a panel that
+  // reopens itself over a running meeting is worse than no panel at all.
+  const waved = useRef({});
 
   useEffect(() => {
     const onPermission = ({ message, kind }) => {
       if (kind === "screenshare") return; // its own flow, never silently denied
+      if (message === "ACCEPTED") {
+        waved.current[kind] = false;
+        setBlockedState((b) => (b && b.kind === kind ? null : b));
+        return;
+      }
       const state = MEDIA_STATE[message];
-      if (state) setBlocked({ state, kind });
-      else if (message === "ACCEPTED") setBlocked(null);
+      if (!state || waved.current[kind]) return;
+      setBlockedState((b) => (b ? b : { state, kind }));
     };
 
     client.self.addListener("mediaPermissionUpdate", onPermission);
@@ -174,7 +189,14 @@ function useBlockedMedia(client) {
     };
   }, [client]);
 
-  return [blocked, setBlocked];
+  const dismiss = () => {
+    setBlockedState((b) => {
+      if (b) waved.current[b.kind] = true;
+      return null;
+    });
+  };
+
+  return [blocked, dismiss];
 }
 
 /**
