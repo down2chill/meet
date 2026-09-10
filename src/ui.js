@@ -156,18 +156,6 @@ export function deepQuery(selector, root) {
   return null;
 }
 
-// Every match, across every open shadow root. Used where the SDK renders many
-// of something -- one <video> per participant tile -- and each needs a look.
-export function deepQueryAll(selector, root, out) {
-  root = root || document;
-  out = out || [];
-  root.querySelectorAll(selector).forEach((el) => out.push(el));
-  root.querySelectorAll("*").forEach((el) => {
-    if (el.shadowRoot) deepQueryAll(selector, el.shadowRoot, out);
-  });
-  return out;
-}
-
 // The SDK's "allow audio playback" dialog lives inside rtk-participants-audio's
 // open shadow root, with its one button as a light child of the rtk-dialog it
 // renders. Outer stylesheets cannot reach in there, but a <style> appended to

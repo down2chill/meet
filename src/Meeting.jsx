@@ -21,20 +21,23 @@ import {
   meetingCode,
   hideAudioDialog,
   pressAudioDialog,
-  deepQueryAll,
 } from "./ui.js";
 import PermissionBlocked from "./Permission.jsx";
 
 // extendConfig merges onto the SDK's default UI config, so we only state the
 // handful of things that differ: our palette, our font, our logo. Each call
 // deep-clones that default, so every config handed out here is independent.
-// The SDK's default: every tile fills itself and crops whatever does not fit.
-// Right for landscape video, wrong for a phone held upright, which is handled
-// per video in useFitByAspect below rather than with this one global switch.
+// Every tile shows the whole video, with bars wherever the shapes do not
+// match, and it looks the same to the person sending it and to everyone
+// watching. The SDK's default is 'cover', which fills the tile and crops: for
+// a phone held upright that keeps a strip down the middle of a tall frame on
+// every viewer's screen. 'contain' is one global switch the SDK applies to
+// every tile on every client, so there is nothing to detect and nothing to
+// keep in step.
 const brandedConfig = () =>
   extendConfig({
     designTokens: MEETING_TOKENS,
-    config: { videoFit: "cover" },
+    config: { videoFit: "contain" },
   });
 const baseConfig = brandedConfig();
 
@@ -44,7 +47,6 @@ export default function Meeting({ client, skipSetup }) {
   const device = useBlockedMedia(client);
   const joined = useJoined(client);
 
-  useFitByAspect();
   useCameraSwitchFix(client, addon);
   useAudioUnlock(client);
 
@@ -364,51 +366,6 @@ function useVideoBackground(client, addonRef) {
   }, [client, addonRef]);
 
   return [config, setConfig];
-}
-
-/**
- * A portrait video is shown whole; a landscape one fills its tile.
- *
- * Which way a tile should fit depends on the shape of the video *in* it, not on
- * who is watching. A phone held upright publishes a tall frame, and a tile that
- * covers it keeps a strip down the middle and throws the rest away -- on every
- * viewer's screen, since each one fits with its own config. So the decision is
- * made per <video>, from its own frame size: taller than wide gets contain,
- * anything else keeps the SDK's cover. That holds for other people's tiles,
- * the self view, and the setup preview alike.
- *
- * The SDK sets fit as a class on the video, inside a shadow root several deep;
- * an inline object-fit outranks the class and survives its re-renders, and
- * deepQueryAll reaches the elements. Tiles come and go as people join, so
- * this looks again on a timer, and a frame that changes shape -- the sender
- * turning their phone -- fires `resize` on the element and is refitted at once.
- */
-function useFitByAspect() {
-  useEffect(() => {
-    const bound = new WeakSet();
-
-    const fitOne = (v) => {
-      if (!v.videoWidth || !v.videoHeight) return;
-      const portrait = v.videoHeight > v.videoWidth;
-      // Empty string removes the override, handing fit back to the class.
-      v.style.objectFit = portrait ? "contain" : "";
-    };
-
-    const sweep = () => {
-      for (const v of deepQueryAll("video")) {
-        if (!bound.has(v)) {
-          bound.add(v);
-          v.addEventListener("loadedmetadata", () => fitOne(v));
-          v.addEventListener("resize", () => fitOne(v));
-        }
-        fitOne(v);
-      }
-    };
-
-    sweep();
-    const timer = setInterval(sweep, 750);
-    return () => clearInterval(timer);
-  }, []);
 }
 
 // Before the Join button is pressed we are on the SDK's setup screen, which
