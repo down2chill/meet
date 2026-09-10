@@ -294,9 +294,11 @@ export function when(ts) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// A record lives 30 days past the last join, so this reads as an idle clock:
+// it resets every time someone gets in.
 export function expiresIn(unixSeconds) {
   if (!unixSeconds) return "";
   const days = Math.round((unixSeconds * 1000 - Date.now()) / 86400000);
-  if (days <= 0) return "expires today";
-  return "expires in " + days + (days === 1 ? " day" : " days");
+  if (days <= 0) return "switches off today if unused";
+  return "switches off in " + days + (days === 1 ? " day" : " days") + " if unused";
 }

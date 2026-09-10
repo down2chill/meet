@@ -12,7 +12,11 @@
  *   POST   /api/rooms               create a meeting
  *   POST   /api/meetings/<code>     update title / password
  *   POST   /api/meetings/<code>/host  issue a fresh host link
- *   DELETE /api/meetings/<code>     delete
+ *   DELETE /api/meetings/<code>     deactivate on Cloudflare, then drop the record
+ *   DELETE /api/orphans/<meetingId> deactivate a meeting Cloudflare has and we do not
+ *
+ * Cron (see wrangler.jsonc): deactivates meetings still ACTIVE on Cloudflare
+ * whose record here has expired -- 30 days after anyone last joined.
  *
  *   GET  /api/debug                 bindings + presets (needs ADMIN_KEY secret)
  *   *                               static assets from the ASSETS binding
@@ -38,7 +42,19 @@ const MAX_TITLE = 100;
 const MAX_PASSWORD = 128;
 const MAX_NAME = 60;
 const MAX_BODY = 4096; // bytes. Nothing legitimate comes close.
+// A record lives 30 days past the last time anyone joined the meeting. Joining
+// extends it (touchRoom); creating or editing does not.
 const ROOM_TTL = 60 * 60 * 24 * 30;
+// A join only rewrites the record when the previous extension is at least this
+// old, so a busy meeting costs one KV write a day rather than one per join.
+const TOUCH_MIN_INTERVAL = 60 * 60 * 24;
+// Meeting ids are UUIDs. Anything else in the URL is not ours to forward.
+const MEETING_ID_RE = /^[a-f0-9-]{8,64}$/i;
+// Cloudflare's meeting list, a page at a time.
+const RTK_PAGE = 100;
+// The sweep never touches a meeting this young: a record written seconds ago
+// can still be missing from KV's list index.
+const FRESH_GRACE_MS = 60 * 60 * 1000;
 // KV's minimum. Anything longer means a deleted meeting stays joinable, and a
 // changed password stays accepted, at an edge that already cached the record.
 const KV_CACHE_TTL = 60;
@@ -91,14 +107,14 @@ const CSP_POLICY = [
 const CSP = null;
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
 
     try {
       if (path === "/api/join")
-        return method === "POST" ? await joinRoom(request, env) : notAllowed();
+        return method === "POST" ? await joinRoom(request, env, ctx) : notAllowed();
 
       if (path === "/api/login")
         return method === "POST" ? await login(request, env) : notAllowed();
@@ -131,6 +147,14 @@ export default {
         return notAllowed();
       }
 
+      if (path.startsWith("/api/orphans/")) {
+        const id = path.slice("/api/orphans/".length);
+        if (!MEETING_ID_RE.test(id)) return json({ error: "Not found" }, 404);
+        return method === "DELETE"
+          ? await guard(request, env, (rq, e) => deactivateOrphan(e, id), url)
+          : notAllowed();
+      }
+
       if (path === "/api/debug") return await debugInfo(env, url);
 
       // Never let an unmatched /api/* path fall through to the SPA shell.
@@ -142,6 +166,14 @@ export default {
       console.error("unhandled", path, err && err.stack ? err.stack : err);
       return json({ error: "Something went wrong." }, 500);
     }
+  },
+
+  // Daily. Records expire 30 days after the last join; whatever is still
+  // ACTIVE on Cloudflare without a record has therefore gone unused for a
+  // month (or was removed here while Cloudflare was unreachable) and is
+  // switched off.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sweepOrphans(env));
   },
 };
 
@@ -277,11 +309,15 @@ async function createRoom(request, env, url) {
     ...links(url, code, hostKey),
     meeting: {
       code,
+      meetingId,
       title: record.title,
       createdAt: record.createdAt,
+      lastUsedAt: null,
       hasPassword: !!record.pwHash,
       expiresAt: record.exp,
       guestLink: links(url, code).guestLink,
+      // Same shape as a listed row, so the optimistic insert behaves like one.
+      status: "active",
     },
   });
 }
@@ -289,64 +325,40 @@ async function createRoom(request, env, url) {
 // One KV list call renders the whole dashboard. The title, creation time and
 // password flag ride along as key metadata, so there is no read per row.
 async function listMeetings(request, env, url) {
-  const listed = await env.ROOMS.list({ prefix: "room:", limit: LIST_LIMIT });
+  // Two lists, fetched together: what Cloudflare says is ACTIVE, and what we
+  // have records for. Cloudflare decides whether a meeting exists; our record
+  // supplies the code, the password flag and the links.
+  const [kv, rtk] = await Promise.all([kvRooms(env), rtkActiveMeetings(env)]);
 
-  const meetings = [];
-  const legacy = [];
+  const byId = new Map(kv.rooms.map((r) => [r.meetingId, r]));
+  const active = new Set(rtk.ok ? rtk.meetings.map((m) => m.id) : []);
 
-  for (const k of listed.keys) {
-    const code = k.name.slice(5);
-    if (!CODE_RE.test(code)) continue;
-    const m = k.metadata;
-    if (m && m.t !== undefined) {
-      meetings.push({
-        code,
-        title: m.t,
-        createdAt: m.c || null,
-        hasPassword: !!m.p,
-        expiresAt: k.expiration || null,
-        guestLink: links(url, code).guestLink,
-      });
-    } else {
-      legacy.push({ code, name: k.name, expiresAt: k.expiration || null });
-    }
-  }
+  const meetings = kv.rooms.map((r) => ({
+    code: r.code,
+    meetingId: r.meetingId,
+    title: r.title,
+    createdAt: r.createdAt,
+    lastUsedAt: r.lastUsedAt,
+    hasPassword: r.hasPassword,
+    expiresAt: r.expiresAt,
+    guestLink: links(url, r.code).guestLink,
+    // "inactive" means Cloudflare no longer has it ACTIVE: the record is a
+    // leftover and can be removed. "unknown" means we could not ask.
+    status: !rtk.ok ? "unknown" : r.meetingId && active.has(r.meetingId) ? "active" : "inactive",
+  }));
 
-  // Rooms created before metadata existed. Opened in parallel, capped, and
-  // they age out on their own within 30 days.
-  const head = legacy.slice(0, LEGACY_LOOKUP_CAP);
-  const rows = await Promise.all(
-    head.map((l) => env.ROOMS.get(l.name, { type: "json", cacheTtl: KV_CACHE_TTL }))
-  );
-  head.forEach((l, i) => {
-    const r = rows[i];
-    // A key that still lists but no longer reads has just been deleted: KV's
-    // list index lags the delete by a few seconds. Skip it rather than drawing
-    // a ghost row that cannot be joined.
-    if (!r) return;
-    meetings.push({
-      code: l.code,
-      title: r.title || "(untitled)",
-      createdAt: r.createdAt || null,
-      hasPassword: !!(r.pwHash || r.password),
-      expiresAt: l.expiresAt,
-      guestLink: links(url, l.code).guestLink,
-    });
-  });
+  // ACTIVE on Cloudflare, no record here. Only claimed when our side of the
+  // picture is complete -- a room we could not open might well be one of them.
+  const orphans =
+    rtk.ok && kv.complete
+      ? rtk.meetings
+          .filter((m) => !byId.has(m.id))
+          .map((m) => ({ meetingId: m.id, title: m.title || "(untitled)", createdAt: m.created_at || null }))
+      : [];
 
-  for (const l of legacy.slice(LEGACY_LOOKUP_CAP)) {
-    meetings.push({
-      code: l.code,
-      title: "(untitled)",
-      createdAt: null,
-      hasPassword: false,
-      expiresAt: l.expiresAt,
-      guestLink: links(url, l.code).guestLink,
-    });
-  }
-
-  meetings.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  return json({ meetings, truncated: !listed.list_complete });
+  meetings.sort((a, b) => (b.lastUsedAt || b.createdAt || 0) - (a.lastUsedAt || a.createdAt || 0));
+  orphans.sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+  return json({ meetings, orphans, truncated: !kv.complete, rtkError: !rtk.ok });
 }
 
 async function updateMeeting(request, env, code) {
@@ -396,12 +408,34 @@ async function rotateHost(env, url, code) {
   return json(links(url, code, hostKey));
 }
 
+// There is no way to delete a meeting on Cloudflare's side, only to switch it
+// off, so that is what "delete" means: PATCH it INACTIVE, and only once that
+// has succeeded drop our record. If Cloudflare cannot be reached the record
+// stays, so the row stays, so it can be tried again rather than becoming one
+// more meeting quietly left running.
 async function deleteMeeting(env, code) {
+  const room = await env.ROOMS.get("room:" + code, { type: "json" });
+  if (!room) return json({ error: "Meeting not found" }, 404);
+
+  if (room.meetingId) {
+    const r = await deactivateMeeting(env, room.meetingId);
+    // 404 means Cloudflare has already forgotten it; nothing left to switch off.
+    if (!r.ok && r.status !== 404)
+      return json({ error: "Cloudflare did not confirm the deactivation. Nothing was removed; try again." }, 502);
+  }
+
   await env.ROOMS.delete("room:" + code);
   return json({ ok: true });
 }
 
-async function joinRoom(request, env) {
+async function deactivateOrphan(env, meetingId) {
+  const r = await deactivateMeeting(env, meetingId);
+  if (!r.ok && r.status !== 404)
+    return json({ error: "Cloudflare did not confirm the deactivation. Try again." }, 502);
+  return json({ ok: true });
+}
+
+async function joinRoom(request, env, ctx) {
   const body = await readJson(request);
   if (!body) return json({ error: "Bad request" }, 400);
 
@@ -457,6 +491,12 @@ async function joinRoom(request, env) {
     return json({ error: "Could not join the meeting." }, 502);
   }
 
+  // Someone got in: this meeting is in use, so its 30 days start again. Off
+  // the response path; the token is what they are waiting for.
+  const touch = touchRoom(env, code, room);
+  if (ctx) ctx.waitUntil(touch);
+  else await touch;
+
   return json({ authToken: token, preset, isHost, title: room.title || null });
 }
 
@@ -509,8 +549,129 @@ function putRoom(env, code, record) {
       t: record.title || "Meeting",
       c: record.createdAt || null,
       p: record.pwHash || record.password ? 1 : 0,
+      m: record.meetingId || null,
+      l: record.lastUsedAt || null,
     },
   });
+}
+
+// The one write that extends a record's life. Rate-limited to once a day per
+// room so a popular meeting does not turn every join into a KV write.
+async function touchRoom(env, code, room) {
+  const now = Math.floor(Date.now() / 1000);
+  if (room.lastUsedAt && now - room.lastUsedAt < TOUCH_MIN_INTERVAL) return;
+  room.lastUsedAt = now;
+  room.exp = now + ROOM_TTL;
+  try {
+    await env.ROOMS.put("room:" + code, JSON.stringify(room), {
+      expirationTtl: ROOM_TTL,
+      metadata: {
+        t: room.title || "Meeting",
+        c: room.createdAt || null,
+        p: room.pwHash || room.password ? 1 : 0,
+        m: room.meetingId || null,
+        l: room.lastUsedAt,
+      },
+    });
+  } catch (err) {
+    console.error("touch failed", code, err);
+  }
+}
+
+/* --------------------- Cloudflare-side meeting state --------------------- */
+
+// Every ACTIVE meeting Cloudflare has for this app, a page at a time.
+async function rtkActiveMeetings(env) {
+  const meetings = [];
+  const maxPages = Math.ceil(LIST_LIMIT / RTK_PAGE);
+  for (let page = 1; page <= maxPages; page++) {
+    const r = await cfApi(env, "/meetings?status=ACTIVE&per_page=" + RTK_PAGE + "&page_no=" + page);
+    const data = r.ok && r.body && Array.isArray(r.body.data) ? r.body.data : null;
+    if (!data) {
+      console.error("meeting list failed", r.status, JSON.stringify(r.body));
+      return { ok: false, meetings };
+    }
+    for (const m of data) if (m && m.id && (m.status || "ACTIVE") === "ACTIVE") meetings.push(m);
+    const total = r.body.paging && r.body.paging.total_count;
+    if (data.length < RTK_PAGE || (total && meetings.length >= total)) break;
+  }
+  return { ok: true, meetings };
+}
+
+async function deactivateMeeting(env, meetingId) {
+  const r = await cfApi(env, "/meetings/" + encodeURIComponent(meetingId), "PATCH", { status: "INACTIVE" });
+  if (!r.ok) console.error("deactivate failed", meetingId, r.status, JSON.stringify(r.body));
+  return r;
+}
+
+// Our records, from the list index alone wherever possible. Rooms written
+// before meetingId went into the metadata are opened to read it, up to a cap;
+// `complete` is false if any could not be, or if there were more than we list.
+async function kvRooms(env) {
+  const listed = await env.ROOMS.list({ prefix: "room:", limit: LIST_LIMIT });
+  const rooms = [];
+  const legacy = [];
+
+  for (const k of listed.keys) {
+    const code = k.name.slice(5);
+    if (!CODE_RE.test(code)) continue;
+    const m = k.metadata;
+    if (m && m.t !== undefined && m.m !== undefined) {
+      rooms.push({
+        code,
+        meetingId: m.m,
+        title: m.t,
+        createdAt: m.c || null,
+        lastUsedAt: m.l || null,
+        hasPassword: !!m.p,
+        expiresAt: k.expiration || null,
+      });
+    } else {
+      legacy.push({ code, name: k.name, expiresAt: k.expiration || null });
+    }
+  }
+
+  const head = legacy.slice(0, LEGACY_LOOKUP_CAP);
+  const rows = await Promise.all(
+    head.map((l) => env.ROOMS.get(l.name, { type: "json", cacheTtl: KV_CACHE_TTL }))
+  );
+  head.forEach((l, i) => {
+    const r = rows[i];
+    if (!r) return; // listed but already gone: the index lags a delete
+    rooms.push({
+      code: l.code,
+      meetingId: r.meetingId || null,
+      title: r.title || "(untitled)",
+      createdAt: r.createdAt || null,
+      lastUsedAt: r.lastUsedAt || null,
+      hasPassword: !!(r.pwHash || r.password),
+      expiresAt: l.expiresAt,
+    });
+  });
+
+  return { rooms, complete: listed.list_complete && legacy.length <= LEGACY_LOOKUP_CAP };
+}
+
+// The cron. Deactivates whatever is ACTIVE on Cloudflare and has no record
+// here. Refuses to act unless our side is complete: with rooms it could not
+// read, "no record" would not mean anything.
+async function sweepOrphans(env) {
+  const [kv, rtk] = await Promise.all([kvRooms(env), rtkActiveMeetings(env)]);
+  if (!rtk.ok || !kv.complete) {
+    console.error("sweep skipped", { rtkOk: rtk.ok, kvComplete: kv.complete });
+    return;
+  }
+  const ours = new Set(kv.rooms.map((r) => r.meetingId).filter(Boolean));
+  const now = Date.now();
+  let off = 0;
+  for (const m of rtk.meetings) {
+    if (ours.has(m.id)) continue;
+    const age = now - (Date.parse(m.created_at || 0) || 0);
+    if (age < FRESH_GRACE_MS) continue;
+    const r = await deactivateMeeting(env, m.id);
+    if (r.ok || r.status === 404) off++;
+  }
+  console.log("sweep", { active: rtk.meetings.length, ours: ours.size, deactivated: off });
 }
 
 function links(url, code, hostKey) {

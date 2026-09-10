@@ -15,6 +15,8 @@ export default function Admin() {
   const [username, setUsername] = useState("");
   const [meetings, setMeetings] = useState(null);
   const [truncated, setTruncated] = useState(false);
+  const [orphans, setOrphans] = useState([]);
+  const [rtkError, setRtkError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -26,6 +28,8 @@ export default function Admin() {
     if (!r.ok) return setErr(r.body.error || "Could not load meetings.");
     setErr("");
     setMeetings(r.body.meetings || []);
+    setOrphans(r.body.orphans || []);
+    setRtkError(!!r.body.rtkError);
     setTruncated(!!r.body.truncated);
   }, []);
 
@@ -47,6 +51,7 @@ export default function Admin() {
     setMeetings((l) => [m, ...(l || []).filter((x) => x.code !== m.code)]);
   const dropMeeting = (code) =>
     setMeetings((l) => (l || []).filter((x) => x.code !== code));
+  const dropOrphan = (id) => setOrphans((l) => l.filter((x) => x.meetingId !== id));
   const patchMeeting = (code, patch) =>
     setMeetings((l) =>
       (l || []).map((x) => (x.code === code ? { ...x, ...patch } : x))
@@ -111,6 +116,13 @@ export default function Admin() {
           {err}
         </div>
 
+        {rtkError && (
+          <div className="hint" style={{ marginTop: 6, textAlign: "left" }}>
+            Cloudflare could not be reached, so this is this app's own records only.
+            Whether each meeting is still live there is unknown until it can be.
+          </div>
+        )}
+
         <h2 className="section-title">
           Meetings{meetings ? " · " + meetings.length : ""}
         </h2>
@@ -136,6 +148,24 @@ export default function Admin() {
           <div className="hint" style={{ marginTop: 16 }}>
             Showing the first 1000 meetings.
           </div>
+        )}
+
+        {orphans.length > 0 && (
+          <>
+            <h2 className="section-title">
+              On Cloudflare, not in this app · {orphans.length}
+            </h2>
+            <div className="hint" style={{ marginBottom: 12, textAlign: "left" }}>
+              Still live on Cloudflare's side with no record here, so nobody can join
+              them through a link. They cost nothing while idle; the nightly sweep will
+              switch them off, or do it now.
+            </div>
+            <div className="stack">
+              {orphans.map((o) => (
+                <Orphan key={o.meetingId} o={o} onDone={() => dropOrphan(o.meetingId)} />
+              ))}
+            </div>
+          </>
         )}
 
         <Footer />
@@ -221,6 +251,10 @@ function Meeting({ m, onDeleted, onUpdated }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  // "inactive" is Cloudflare's word: the meeting is switched off there, so
+  // the links are dead and only the leftover record is ours to remove.
+  const live = m.status !== "inactive";
+
   const act = async (path, opts) => {
     setBusy(true);
     setErr("");
@@ -239,8 +273,12 @@ function Meeting({ m, onDeleted, onUpdated }) {
 
       <div className="meta">
         <span className="code-chip">{m.code}</span>
-        <span>{when(m.createdAt)}</span>
-        {m.expiresAt && (
+        {m.status === "inactive" && <span className="lock">inactive on Cloudflare</span>}
+        {m.status === "unknown" && <span className="lock">status unknown</span>}
+        <span>created {when(m.createdAt)}</span>
+        <span className="meta-sep">/</span>
+        <span>{m.lastUsedAt ? "last joined " + when(m.lastUsedAt * 1000) : "never joined"}</span>
+        {m.expiresAt && m.status !== "inactive" && (
           <>
             <span className="meta-sep">/</span>
             <span>{expiresIn(m.expiresAt)}</span>
@@ -255,29 +293,33 @@ function Meeting({ m, onDeleted, onUpdated }) {
       </div>
 
       <div className="row" style={{ marginTop: 16 }}>
-        <a className="btn btn-sm" href={"/j/" + m.code}>
-          Join as host
-        </a>
-        <CopyButton value={m.guestLink} labelText="Copy invite" />
-        <button
-          className="btn btn-sm"
-          onClick={() => setEditing(!editing)}
-          disabled={busy}
-        >
-          {editing ? "Close" : "Edit"}
-        </button>
-        <button
-          className="btn btn-sm"
-          disabled={busy}
-          onClick={async () => {
-            const b = await act("/api/meetings/" + m.code + "/host", {
-              method: "POST",
-            });
-            if (b) setHostLink(b.hostLink);
-          }}
-        >
-          New host link
-        </button>
+        {live && (
+          <>
+            <a className="btn btn-sm" href={"/j/" + m.code}>
+              Join as host
+            </a>
+            <CopyButton value={m.guestLink} labelText="Copy invite" />
+            <button
+              className="btn btn-sm"
+              onClick={() => setEditing(!editing)}
+              disabled={busy}
+            >
+              {editing ? "Close" : "Edit"}
+            </button>
+            <button
+              className="btn btn-sm"
+              disabled={busy}
+              onClick={async () => {
+                const b = await act("/api/meetings/" + m.code + "/host", {
+                  method: "POST",
+                });
+                if (b) setHostLink(b.hostLink);
+              }}
+            >
+              New host link
+            </button>
+          </>
+        )}
         {confirming ? (
           <>
             <button
@@ -288,7 +330,7 @@ function Meeting({ m, onDeleted, onUpdated }) {
                 if (b) onDeleted();
               }}
             >
-              Really delete
+              {live ? "Really deactivate" : "Really remove"}
             </button>
             <button
               className="btn btn-sm"
@@ -304,7 +346,7 @@ function Meeting({ m, onDeleted, onUpdated }) {
             onClick={() => setConfirming(true)}
             disabled={busy}
           >
-            Delete
+            {live ? "Deactivate" : "Remove record"}
           </button>
         )}
       </div>
@@ -397,6 +439,39 @@ function Edit({ m, onSaved }) {
       </button>
       <div className="err">{err}</div>
     </form>
+  );
+}
+
+function Orphan({ o, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  return (
+    <div className="card card-row">
+      <div className="card-title">{o.title}</div>
+      <div className="meta">
+        <span className="code-chip">{o.meetingId.slice(0, 8)}</span>
+        <span>created {when(Date.parse(o.createdAt))}</span>
+      </div>
+      <div className="row" style={{ marginTop: 16 }}>
+        <button
+          className="btn btn-sm btn-danger"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setErr("");
+            const r = await api("/api/orphans/" + o.meetingId, { method: "DELETE" });
+            setBusy(false);
+            if (!r.ok) return setErr(r.body.error || "That did not work.");
+            onDone();
+          }}
+        >
+          {busy ? "Deactivating..." : "Deactivate"}
+        </button>
+      </div>
+      <div className="err err-left" style={{ marginTop: 10 }}>
+        {err}
+      </div>
+    </div>
   );
 }
 
